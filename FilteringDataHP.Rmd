@@ -1,0 +1,87 @@
+---
+title: "FilteringData"
+author: "Rebecca Han"
+date: "2024-01-10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## read the pollutants and temperature data 
+```{r warning=FALSE}
+library(readxl)
+library(writexl)
+pollutants_df <- read_excel(path = "nmmaps_chic_1987_2000.xlsx",.name_repair = "unique_quiet")
+#str(pollutants_df)
+```
+
+
+
+
+
+```{r}
+
+
+library("gam")  #  auto-loads 'splines'
+library("slp")
+library("MASS")
+
+N <- 5114
+tArr <- 1:N
+dfGAM <- c(60, 120, 60, 120)
+dfGAM <- as.integer(dfGAM*5114/3650)
+set.seed(23)
+
+basis1 <- ns(x = tArr, df = dfGAM[1])
+basis2 <- ns(x = tArr, df = dfGAM[2])
+basis3 <- slp(x = tArr, K = dfGAM[3], naive = TRUE)
+basis4 <- slp(x = tArr, K = dfGAM[4], naive = TRUE)
+basis5 <- slp(x = tArr, K = dfGAM[3], intercept = TRUE)
+basis6 <- slp(x = tArr, K = dfGAM[4], intercept = TRUE)
+basis7 <- basis5[, -1] # equiv to running slp with intercept = FALSE
+basis8 <- basis6[, -1]
+bases <- vector("list", 8)
+for(j in 1:8) { bases[[j]] <- get(paste("basis", j, sep="")) }
+save(file=".FilterBases.RData", bases)
+```
+
+```{r}
+
+# Load the 4 basis sets and assign them to variable names used below
+load(".FilterBases.RData")
+for(j in 1:8) {
+  assign(paste("basis", j, sep = ""), bases[[j]])
+}
+
+S1 <- basis1 %*% ginv(t(basis1) %*% basis1) %*% t(basis1)
+S2 <- basis2 %*% ginv(t(basis2) %*% basis2) %*% t(basis2)
+S3 <- basis3 %*% t(basis3)  # orthonormal, no inverse needed
+S4 <- basis4 %*% t(basis4)
+S5 <- basis5 %*% t(basis5)
+S6 <- basis6 %*% t(basis6)
+S7 <- basis7 %*% t(basis7)
+S8 <- basis8 %*% t(basis8)
+```
+
+```{r warning=FALSE}
+# filter the data
+pollutants_list <- list()
+for (j in 1:8){
+  pollutants_df<- read_excel(path="nmmaps_chic_1987_2000.xlsx",.name_repair = "unique_quiet")
+  for(i in 4:26){
+    X <- as.vector(unlist(pollutants_df[,i]))
+    X <- X-get(paste("S", j, sep=""))%*%X
+    pollutants_df[,i] <- X
+  }
+  pollutants_list[[j]] <- pollutants_df
+  
+}
+names(pollutants_list) <- c("S1","S2","S3","S4","S5","S6","S7","S8")
+write_xlsx(pollutants_list, "./nmmaps_chic_1987_2000Filter.xlsx")
+
+
+```
+
+
