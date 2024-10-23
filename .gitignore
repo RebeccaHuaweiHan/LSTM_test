@@ -3,3 +3,17 @@
 .RData
 .Ruserdata
 airpollutantLSTM_Oct142024.Rmd
+.FilterBases.RData
+data_nmmaps
+.loss4.eps
+.loss4.png
+GOOG.csv
+losses.xlsx
+lossesF.xlsx
+lstm_stock.Rmd
+lstm_stock.ipynb
+metrics.xlsx
+nmmaps_chic_1987_2000Filter.xlsx
+note.Rmd
+predictions.xlsx
+predictionsF.xlsx
