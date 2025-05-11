@@ -586,12 +586,34 @@ Citydata_precoss <- function(df,HP_filter=5){
 # write_xlsx(Citydata,path=paste0(filepath,"/Citydata_save2.xlsx"))
 ```
 
+```{r}
+## Only calculate the GLM slopes on the training data set
+################################################################################
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+load(paste0(filepath,"/Citydata.RData"))
+Citydata_Training <- purrr::map(Citydata,head,-262)
+save(Citydata_Training,file = paste0(filepath,"/Citydata_Training.RData"))
+
+load(paste0(filepath,"/Citydata_Training.RData"))
+Citydata_T <- purrr::map(Citydata_Training,Citydata_precoss)
+save(Citydata_T,file = paste0(filepath,"/Citydata_filtered_exp_training.RData"))
+
+
+
+```
+
 ```{r GLM}
 library(mgcv)  # version:1.9.1
 filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
 load(paste0(filepath,"/Citydata_filtered_exp.RData"))
 City_GLM<- purrr::map(Citydata,glm,formula=death_filtered_exp~pm10_dow_HP+o3_dow_HP+tmpd_dow_HP,family=quasipoisson())
 
+
+################################################################################
+# Only on training data set
+load(paste0(filepath,"/Citydata_filtered_exp_training.RData"))
+City_GLM<- purrr::map(Citydata_T,glm,formula=death_filtered_exp~pm10_dow_HP+o3_dow_HP+tmpd_dow_HP,family=quasipoisson())
+save(City_GLM,file = paste0(filepath,"/City_GLM.RData"))
 
 ```
 
@@ -674,8 +696,348 @@ Resi_from_pred <- function(PreFile,CityFile,cityname){
 ```
 
 ```{r}
-# transform the Predictive valuses (by function LSTM_Predict()) into data.frame for 10 cities
-citynames <- 
+# transform the Predictive values (results of function LSTM_Predict()) into data.frame for 10 cities
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+CityFile <- "~/deeplearning/LSTM_Test/LSTM_Test/function_test/sanj.rda"
+City_Full_residual <- data.frame()
+City_Without_residual <- data.frame()
+
+for (cityname in citynames){
+  df <- Resi_from_pred(PreFile = paste0(filepath,"/",cityname,"_Full.xlsx"),CityFile = CityFile,cityname = cityname )
+  City_Full_residual <- dplyr::bind_rows(City_Full_residual,df)
+  df <- Resi_from_pred(PreFile = paste0(filepath,"/",cityname,"_WithoutPM.xlsx"),CityFile = CityFile,cityname = cityname )
+  City_Without_residual <- dplyr::bind_rows(City_Without_residual,df)
+}
+
+
+```
+
+```{r}
+#' Title Use predictive vaules to calculate LSTM-based association coefficients(slopes)
+#' The function takes the full model's predictive values from PredicFull, and takes the predictive values of model without the PM10 by PredictWithout. Both the PredictFull and PredictWithout files have the format saved by the function LSTM_Predict(). 
+#' predictor should have the "pm10orig" variable to fit the final linear regression.
+# return Slope as a vector with length 8. Each value is a slope for the model with one looking back step
+
+#'
+#' @param df_Full  A data.frame of the full model's predictive values. The form of this data.frame
+#' is sheet that saved by function LSTM_Predict(). 
+
+#' @param df_Off  A data.frame of the predictive values from the model without predictor. The form of this data.frame is sheet that saved by function LSTM_Predict().
+#' @param predictor_df predictor_df is the data.frame that has the predictor values that will fit the final linear regression. In our case, it is the time series of PM10 with the column name 'origpm10'.
+#' @param predictor the column name of predictors in the predictor_df for the final linear regression
+#' @param trials number of trials of LSMT
+#' @param seq lookback steps. Default is 1
+#' @param cityname the cityname 
+#' @param intercept Whether the final linear regression will have the intercept. Default is FALSE
+#' @param TrainingOnly Logic value representing wether only use training data. The number of cutting off the rest data is `cutoff`
+#' @param cutoff The number for cutting off the data/time series for Training-only data. This number will be used when 'TrainingOnly = TRUE'. The default number is 262
+#'
+#' @return data frame with 3 columns: "slopes" of each trial, "seq", and "cityname"=NA
+#' @export
+#'
+#' @examples
+
+LSTM_association <- function(df_Full,df_Off,predictor_df,predictor="pm10orig",trials=30,seq,cityname=NA,intercept=FALSE,TrainingOnly=TRUE,cutoff=262,...){
+  
+  if (TrainingOnly) {
+    df_Full <- head(df_Full,-cutoff)
+    df_Off <- head(df_Off,-cutoff)
+    predictor_df <- head(predictor_df,-cutoff)
+  }
+  
+  slopes <- NULL
+  if (seq>1) {predictor_df <- predictor_df[-seq(1,seq-1),]}
+  for (j in 1:trials){
+    Diff <- df_Full[[paste0("predict",j)]]- df_Off[[paste0("predict",j)]]
+    dat <- data.frame(Diff=Diff,PM10=predictor_df[[predictor]])
+    if (intercept){
+      mod <- lm(Diff~PM10,data=dat)
+      slopes <- c(slopes,mod$coefficients[2])
+      }
+    else {
+      mod <- lm(Diff~PM10-1,data=dat)
+      slopes <- c(slopes,mod$coefficients)
+      }
+  }
+  names(slopes) <- NULL
+  Slopes <- data.frame(slope=slopes,seq=rep(seq,trials),cityname=as.character(rep(cityname,trials)))
+  Slopes$seq <- as.factor(Slopes$seq)
+  Slopes$cityname <- as.factor(Slopes$cityname)
+  return(Slopes)
+}
+
+
+# example
+# filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+# cityname <- "la"
+# file_full <- paste0(filepath,"/",cityname,"_Full.xlsx")
+# file_without <- paste0(filepath,"/",cityname,"_WithoutPM.xlsx")
+# df_Full <- read_xlsx(file_full,sheet = paste0('seq=',2))
+# df_Off <- read_xlsx(file_without,sheet = paste0('seq=',2))
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/",cityname,".rda"))# the name of the data.frame is df
+# predictor_df <- df
+# seq <- 2
+# Lstm_slope <- LSTM_association(df_Full,df_Off,predictor_df,predictor="pm10orig",trials=30,seq=seq,cityname=cityname,intercept=FALSE)
+# summary(Lstm_slope)
+# plot(Lstm_slope$slope)
+# # With intercept in the linear regression
+# Lstm_slope <- LSTM_association(df_Full,df_Off,predictor_df,predictor="pm10orig",trials=30,seq=seq,cityname=cityname,TrainingOnly = T,cutoff = 262 )
+# summary(Lstm_slope)
+# plot(Lstm_slope$slope)
+```
+
+
+```{r}
+#' Title Calculate the LSTM-based association coefficient for each city
+#'
+#' @param cityname 
+#' @param filepath the folder that has all the 'Full' and 'Without' .xlsx files 
+#' @param predictor_path the folder that has city data
+#' @param seq_range range of the look back , 1:8 by default
+#' @param save1 logical value, whether use the save1 type data
+#' @param intercept whether there is intercept in the final linear regression
+#'
+#' @return return a data.frame 'Slopes' in a long form. variables are "slope", "seq", "cityname"
+
+#' @export
+#'
+#' @examples filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+#' predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+#' cityname <- "la"
+#' Slopes <- LSTM_assoc_citylevel(cityname, filepath,predictor_path, seq_range=seq(1:8),save1=FALSE,intercept=FALSE)
+
+LSTM_assoc_citylevel <- function(cityname, filepath,predictor_path,seq_range=seq(1:8),save1=FALSE,...)
+{
+  # return a data.frame Slopes in a long form. variables are "slope", "seq", "cityname"
+  
+  Slopes <- data.frame(slope=NA,seq=NA,cityname=NA)
+  
+  if (save1){
+    file_full <- paste0(filepath,"/",cityname,"_Full_save1.xlsx")
+    file_without <- paste0(filepath,"/",cityname,"_WithoutPM_save1.xlsx")
+  }else {
+    file_full <- paste0(filepath,"/",cityname,"_Full.xlsx")
+    file_without <- paste0(filepath,"/",cityname,"_WithoutPM.xlsx")
+  }
+  
+  for (seq in seq_range){
+    
+    df_Full <- read_xlsx(file_full,sheet = paste0('seq=',seq))
+    df_Off <- read_xlsx(file_without,sheet = paste0('seq=',seq))
+    load(paste0(predictor_path,"/",cityname,".rda"))# the name of the data.frame is df
+    predictor_df <- df
+    Lstm_slope <- LSTM_association(df_Full,df_Off,predictor_df,predictor="pm10orig",seq=seq,cityname=cityname,...)
+    
+    Slopes <- rbind(Slopes,Lstm_slope)  
+  }
+  Slopes <- Slopes[-1,]
+ 
+}
+
+# Example 1 
+
+# Slopes <- LSTM_assoc_citylevel(cityname, filepath,predictor_path, seq_range=seq(1:8),save1=FALSE,intercept=FALSE)
+# 
+# library(ggplot2)
+# ggplot(data = Slopes, mapping =  aes(x = seq, y = slope))+
+#   geom_boxplot()+
+#   labs(title = "LSTM based Slopes for LA", x = "looking back steps", y = "LSTM based Slopes")
+```
+
+```{r}
+ ## Give multiple cities' LSTM slopes box-plots
+LSTM_ASS_MulCityPlot <- function(citynames,AddAverage=F,...){
+  
+  args <- list(...)
+  
+  Slopes_MulC <- data.frame(slope=NA,seq=NA,cityname=NA)
+  for (cityname in citynames){
+    Slopes_MulC<- rbind(Slopes_MulC,LSTM_assoc_citylevel(cityname=cityname,...))
+    
+  }
+  Slopes_MulC <- Slopes_MulC[-1,]
+  
+  library(ggplot2)
+  ggplot(data = Slopes_MulC, mapping =  aes(x = seq, y = slope))+
+    geom_boxplot()+
+    labs( title = args$PlotTitle,x = "looking back steps", y = "LSTM based Slopes")+
+    facet_wrap(~ cityname)
+  if (AddAverage){
+    
+    ggplot(data = Slopes_MulC, mapping =  aes(x = seq, y = slope))+
+      geom_boxplot() +
+      stat_summary(
+        fun = mean,
+        geom = "line",
+        aes(group = 1, color = "Average"),
+        size = 0.5
+      ) +
+      labs(
+        title = args$PlotTitle,
+        x = "Looking Back Steps",
+        y = "LSTM Based Slopes",
+        color = "Average Slope"
+      ) +
+      facet_wrap(~ cityname)
+  }
+  
+  
+
+  
+}
+
+
+# filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+# predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,TrainingOnly = F,PlotTitle = "LSTM based Slopes on Training and Testing Data Set (exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save2.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,save1 = T,TrainingOnly = F,PlotTitle = "LSTM based Slopes on Training and Testing Data Set (non-exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save1.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save2_training.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,save1 = T,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (non-exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save1_training.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,AddAverage=T,filepath=filepath,predictor_path=predictor_path,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (exponentialed response)")
+# LSTM_ASS_MulCityPlot(citynames=citynames,AddAverage=T,filepath=filepath,predictor_path=predictor_path,save1 = T,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (non-exponentialed response)")
+```
+
+```{r}
+# returen Multiple Cities' LSTM slopes data.frame
+LSTM_ASS_MulCityDF <- function(citynames,...){
+  
+  Slopes_MulC <- data.frame(slope=NA,seq=NA,cityname=NA)
+  for (cityname in citynames){
+    Slopes_MulC<- rbind(Slopes_MulC,LSTM_assoc_citylevel(cityname=cityname,...))
+    
+  }
+  Slopes_MulC <- Slopes_MulC[-1,]
+  return(Slopes_MulC)
+}
+
+# Example
+################################################################################
+# filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+# predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+# 
+# LSTM_10cities_save1 <- LSTM_ASS_MulCityDF(citynames=citynames,filepath=filepath,predictor_path=predictor_path,save1 = T)
+# LSTM_10cities_save2 <- LSTM_ASS_MulCityDF(citynames=citynames,filepath=filepath,predictor_path=predictor_path)
+# 
+# save(LSTM_10cities_save1,file = paste0(predictor_path,"/LSTM_10cities_save1.RData"))
+# save(LSTM_10cities_save2,file = paste0(predictor_path,"/LSTM_10cities_save2.RData"))
+
+```
+
+
+
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_10cities_save1.RData")
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_10cities_save2.RData")
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/City_GLM.RData")
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+GLM_slope <- data.frame(slope=NA,lower_b=NA,upper_b=NA,cityname=NA)
+for (cityname in citynames){
+  q <- qt(p = 0.975, df = 586)
+  coefs1 <- summary(City_GLM[[cityname]])$coefficients["pm10_dow_HP", 1:2]
+  CI <- coefs1[1] + c(-1, 1) * q * coefs1[2]
+  
+  glm_slope <- data.frame(slope = City_GLM[[cityname]]$coefficients[2],lower_b=CI[1],upper_b=CI[2],cityname=cityname)
+  GLM_slope <- rbind(GLM_slope,glm_slope)
+}
+GLM_slope <- GLM_slope[-1,]
+row.names(GLM_slope) <- NULL
+names(GLM_slope) <- c("GLM_slope","GLM_lowerB","GLM_upperB","cityname")
+names(LSTM_10cities_save1) <- c("LSTM_slope","seq","cityname")
+names(LSTM_10cities_save2) <- c("LSTM_slope","seq","cityname")
+
+###################################################################
+##   GLM vs. LSTM(save1 & save2)
+GLM_slope$GLM_slope_exp <- exp(GLM_slope$GLM_slope)
+GLM_slope$GLM_upperB_exp <- exp(GLM_slope$GLM_upperB)
+GLM_slope$GLM_lowerB_exp <- exp(GLM_slope$GLM_lowerB)
+
+Com1 <- dplyr::left_join(LSTM_10cities_save1,GLM_slope,by='cityname')
+Com2 <- dplyr::left_join(LSTM_10cities_save2,GLM_slope,by='cityname')
+
+summary(Com1)
+
+Com1_sorted <- Com1 %>%
+  filter(seq == 5 ) %>%
+  group_by(cityname) %>%
+  summarize(mean_GLM_slope = mean(GLM_slope, na.rm = TRUE)) %>%
+  arrange(mean_GLM_slope)
+
+Com1$cityname <- factor(Com1$cityname, levels = Com1_sorted$cityname)
+
+ggplot(data = Com1[Com1$seq>1 & Com1$seq<9,])+
+  geom_boxplot(aes(x=cityname,y=LSTM_slope),color='chartreuse')+
+  geom_point(aes(x=cityname, y=GLM_upperB/700),shape=25, color='brown3',alpha=0.2)+
+  geom_point(aes(x=cityname, y=GLM_lowerB/700),shape=24,color='darkred',alpha=0.2)+
+  facet_wrap(~ seq)+
+  scale_y_continuous(limits = c(-0.000005,0.000005),sec.axis = sec_axis(~ . * 700, name = "GLM Slope"))
+
+
+summary(Com2)
+
+Com2_sorted <- Com2 %>%
+  filter(seq == 5 ) %>%
+  group_by(cityname) %>%
+  summarize(mean_GLM_slope = mean(GLM_slope, na.rm = TRUE)) %>%
+  arrange(mean_GLM_slope)
+
+Com2$cityname <- factor(Com2$cityname, levels = Com2_sorted$cityname)
+
+ggplot(data = Com2[Com2$seq>1 & Com2$seq<9,])+
+  geom_boxplot(aes(x=cityname,y=LSTM_slope),color='chartreuse')+
+  # geom_point(aes(x=cityname, y=GLM_upperB_exp/70000),shape=25, color='brown3',alpha=0.2)+
+  # geom_point(aes(x=cityname, y=GLM_lowerB_exp/70000),shape=24,color='darkred',alpha=0.2)+
+  geom_point(aes(x=cityname, y=GLM_slope),shape=21,color='darkorange',alpha=0.2)+
+  facet_wrap(~ seq)+
+  scale_y_continuous(sec.axis = sec_axis(~ . * 700, name = "GLM Slope"))
+
+
+
+ggplot(data = Com2,mapping = aes(x=cityname, y = GLM_upperB_exp))+
+  geom_point()
+
+
+```
+```{r} 
+##################
+###calculate LSTM slopes for unfiltered input models
+################################################################################
+filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_unfiltered"
+predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_unfiltered"
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+LSTM_10cities <- LSTM_ASS_MulCityDF(citynames=citynames,filepath=filepath,predictor_path=predictor_path,trials =1)
+
+###Visualization
+################################################################################
+names(LSTM_10cities) <- c("LSTM_slope","seq","cityname")
+Com <- dplyr::left_join(LSTM_10cities,GLM_slope,by='cityname')
+Com_sorted <- Com %>%
+  filter(seq == 5 ) %>%
+  group_by(cityname) %>%
+  summarize(mean_GLM_slope = mean(GLM_slope, na.rm = TRUE)) %>%
+  arrange(mean_GLM_slope)
+
+Com$cityname <- factor(Com$cityname, levels = Com_sorted$cityname)
+library(ggplot2)
+ggplot(data = Com)+
+  geom_point(mapping = aes(x=cityname, y = GLM_slope/LSTM_slope),color="red")+
+  facet_wrap(~ seq)+
+  scale_y_continuous(limits = c(-50,50),sec.axis = sec_axis(~ . * 1, name = "GLM Slope"))
+
+ggplot(data = Com)+
+  geom_point(mapping = aes(x=cityname, y = GLM_slope),color="red")+
+  geom_boxplot(mapping = aes(x=cityname, y = LSTM_slope),color="chartreuse")
 
 ```
 
