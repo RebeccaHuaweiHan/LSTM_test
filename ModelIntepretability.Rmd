@@ -1,0 +1,1099 @@
+```{python packages/libraries}
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.autograd import Variable
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import MinMaxScaler,StandardScaler
+from sklearn.metrics import mean_squared_error  # mse
+from sklearn.metrics import mean_absolute_error  # mae
+from sklearn.metrics import mean_absolute_percentage_error # mape
+from sklearn.metrics import r2_score  # R square
+import os, math
+import glob
+import re
+import lime
+import lime.lime_tabular
+import random
+```
+
+```{python data_preprocess}
+def count_na_interpolate(df):
+    """
+    interpolation of dataset
+    :param df: dataframe of air pollutants
+    :return: dataset with interpolation
+    """
+    rows = df.index
+    cols = df.columns
+    r, c = len(list(rows)),len(list(cols))    # print(rows,cols,r,c)
+    for col in cols:
+        num_na = df[col].isna().sum()
+        
+        if num_na >0:
+            df[col] = df[col].interpolate(method='polynomial',order=2)
+    return df
+#################################################################################
+def data_scaler(df):
+    """
+    scale the dataset using standardization
+    :param df: df with interpolation
+    :return: dt_out: the whole dataset after standardization, scaler: all scalers used, for later inverse transform
+    """
+    dt = df.values
+    dt = dt.astype("float32")
+    r,c = dt.shape # row=5114
+    dt_scaler= dt[:,0].reshape((r,1)) 
+    scaler = []
+    dt_out = np.empty((r,0))
+    for i in np.arange(c-1):
+        dt_scaler =np.concatenate((dt_scaler,dt[:,i+1].reshape((r,1))),axis=1)  
+    ##################################### normalization
+    # for j in np.arange(c):
+    #     # scaler.append(MinMaxScaler())
+    #     scaler.append(StandardScaler())
+    #     tempt = scaler[j].fit_transform(dt_scaler[:, j].reshape((r, 1)))
+    #     dt_out = np.concatenate((dt_out,tempt),axis=1)
+    ##################################### standardization
+    for j in np.arange(c):
+        scaler.append(StandardScaler())
+        tempt = scaler[j].fit_transform(dt_scaler[:, j].reshape((r, 1)))
+        dt_out = np.concatenate((dt_out,tempt),axis=1)
+    
+    return dt_out,scaler
+
+def create_dataset(dt,seq):
+    """
+    reshape the dataset into (sequence,prediction) form, the first col dt[:,0] is the "health consequence", like mortality, cvd ...
+    :param dt: dataset after interpolation and rescaling
+    :param seq: sequence
+    :return: (sequenced data,prediction)
+    """
+    r,c = dt.shape 
+    dataX, dataY = [], [] # class list
+    ################### impact of the day when consequence occurs is included
+    for i in range(r - seq + 1):
+        x = dt[i:(i + seq), 1:c] # (seq,c-1)
+        y = dt[i + seq - 1,0] # (look_back,1)
+        dataX.append(x)
+        dataY.append([y])
+    ################### not included, only previous days' exposure are included
+    # for i in range(r - seq):
+    #     x = dt[i:(i + seq), 1:c]  # (seq,c-1)
+    #     y = dt[i + seq, 0]  # (look_back,1)
+    #     dataX.append(x)
+    #     dataY.append([y])
+    return np.array(dataX), np.array(dataY)
+
+def dataset_partition(dataX,dataY,train_proportion=0.7):
+    """
+    partition the dataset into training set and test set
+    :param dataX: input sequenced features-air pollutants sequence
+    :param dataY: mortality/morbidity
+    :return:
+    """
+    r,c = dataY.shape # r = 5114-seq+1
+    train_size = int(r * train_proportion) # proportion for partition
+    test_size = r - train_size
+
+    torch_dataX= torch.from_numpy(dataX).type(torch.float32) # (r,seq,cols)
+    torch_dataY= torch.from_numpy(dataY).type(torch.float32) # (r,1)
+
+    train_x = torch_dataX[:train_size,:] #(train_size,seq,cols)
+    train_y = torch_dataY[:train_size]   #(test_size,1)
+    test_x = torch_dataX[train_size:,:]
+    test_y = torch_dataY[train_size:]
+    
+    ############################ run on GPU
+    device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+    )
+    torch_dataX = torch_dataX.to(device)
+    torch_dataY = torch_dataY.to(device)
+    train_x = train_x.to(device)
+    train_y = train_y.to(device)
+    test_x = test_x.to(device)
+    test_y = test_y.to(device)
+    
+    return torch_dataX,torch_dataY,train_x,train_y,train_size,test_x,test_y,test_size
+```
+
+```{python BuiltModel}
+class att(nn.Module):
+    def __init__(self,hidden):
+        super(att,self).__init__()
+        self.input = nn.Sequential(
+            
+            nn.Linear(hidden,1) # attention on all output of hidden layers
+            
+        )
+    def forward(self, x):
+        ############################# attention on the all output
+        w = self.input(x) # (batch_size, seq, hidden) >> (batch_size,seq,1)
+        
+        ws = F.softmax(w.squeeze(-1),dim=1) # torch.Size(batch_size,seq)
+        out_att0 = (x * ws.unsqueeze(-1)).sum(dim=1) #output: (batch_size,hidden)  (b,seq,hidden_size)*(b,seq,1)=(b,seq,hidden_size) after sum: (b,13)
+        # print("out_att:", out_att.shape)
+        ############################# attention on the last output x[:,-1,:] (batch_size,hidden_size)
+        # w = self.input(encoder) # (batch_size, hidden) >> (batch_size,hidden)
+        # ws = F.softmax(w,dim=1) # (batch_size,-1, hidden)
+        # out_att = encoder*ws #(batch_size,hidden) (b,13)*(b,13)=(b,13)
+        #############################
+        return out_att0
+
+############################################################ RNN class
+class LSTM_model(torch.nn.Module):
+    def __init__(self, input_size, hidden_size, out_size,num_layers) -> None:
+        super(LSTM_model, self).__init__()
+        self.rnn = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        # self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        # self.rnn = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.attention = att(hidden_size)
+        self.linear_out = nn.Sequential(
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(True),
+            nn.Linear(hidden_size, out_size)
+        )
+
+    def forward(self, x):
+        
+        x, _ = self.rnn(x) # (batch_size, seq, input_size)>>(batch_size, seq, hidden_size)
+        
+        out_att = self.attention(x) 
+        
+        out_in = self.linear_out(out_att) # 
+
+        return out_in
+#############################################################
+```
+
+```{python Read&SplitData}
+def read_data(features,filepath = './data_nmmaps/nmmaps_chic_1987_2000.xlsx',sheet_name=0):
+    
+    
+    df = pd.read_excel(filepath, engine='openpyxl',sheet_name=sheet_name)  
+   
+    df = df[features] 
+   
+    dt, scaler = data_scaler(df) 
+    return dt, scaler
+
+def split_dataset(dt,seq,train_proportion = 0.7):
+    """
+    prepare the normalized data into training dataset and testing dataset with regard to the looking back steps/seq
+    """
+    dataX, dataY = create_dataset(dt, seq) 
+    torch_dataX,torch_dataY,train_x,train_y,train_size,test_x,test_y,test_size = dataset_partition(dataX,dataY,train_proportion)
+    batch_train, seq_train, feature_size = train_x.shape
+    
+    return dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size
+```
+
+
+```{python training}
+def train_model(feature_size, train_x, train_y, train_size, epochs_set):
+    h_size = 13
+    o_size = 1
+    n_layers = 5
+    l_rate = 5e-2 
+    epochs = epochs_set  
+    step = 100 
+    
+    # seed = 65
+    # torch.manual_seed(seed)# set random seed
+    ############################################################################
+    nn_net = LSTM_model(input_size = feature_size, hidden_size = h_size, out_size = o_size, num_layers = n_layers)
+    
+    ###### run the model on GPU################################################
+    device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+    )
+    nn_net = nn_net.to(device)
+    
+    loss_fun = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(nn_net.parameters(), lr=l_rate)
+    step_schedule = torch.optim.lr_scheduler.StepLR(step_size=step, gamma=0.95, optimizer=optimizer)
+
+    running_loss = 0.0
+   
+   
+    loss_show = []
+    for epoch in range(epochs):
+        var_x = train_x
+        var_y = train_y.reshape(train_size, -1)
+        out = nn_net(var_x)
+        loss = loss_fun(out, var_y)
+        loss_show.append(loss.item())
+        running_loss += loss.item()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        step_schedule.step()
+
+        
+    return nn_net, loss_show
+```
+
+```{python testing}
+def test_model(nn_net, dataY, torch_dataX, scaler):
+    test_net = nn_net.eval()  
+    train_predict = test_net(torch_dataX)
+    
+    if torch.cuda.is_available():
+      train_predict = train_predict.to('cpu') # if the model is running on GUP, move it to CPU
+    data_predict = train_predict.data.numpy()   # torch.Size([5110,1])
+    data_true = dataY                           # torch.Size([5110,1])
+    ####################################################### inversed scaling of mortality
+    data_predict = scaler[0].inverse_transform(data_predict)
+    data_true = scaler[0].inverse_transform(data_true)
+    
+    
+    
+    return data_predict, data_true
+
+```
+
+
+```{python metrics}
+def performance_metrics1(y_predict, y_true):
+    loss_error = y_predict - y_true
+    loss_mse = np.sum(loss_error**2)/len(loss_error)
+    loss_rmse = loss_mse**0.5
+    loss_mae = np.sum(np.absolute(loss_error)) / len(loss_error)
+    r_squared = 1-(np.sum((y_predict-y_true)**2)/np.var(y_true)/len(loss_error))
+    MAPE = np.sum(np.absolute(loss_error/y_true)) / len(loss_error)
+    return loss_error,loss_mse,loss_rmse,loss_mae,MAPE,r_squared
+def performance_metrics2(data_predict,data_true, train_size,mute = True):
+    error = data_predict-data_true
+    mse_train = mean_squared_error(data_true[0:train_size],data_predict[0:train_size])
+    rmse_train = mse_train**0.5
+    mae_train = mean_absolute_error(data_true[0:train_size],data_predict[0:train_size])
+    mape_train = mean_absolute_percentage_error(data_true[0:train_size],data_predict[0:train_size])
+    r2_train = r2_score(data_true[0:train_size],data_predict[0:train_size])
+
+    mse_test = mean_squared_error(data_true[train_size:],data_predict[train_size:])
+    rmse_test = mse_test**0.5
+    mae_test = mean_absolute_error(data_true[train_size:],data_predict[train_size:])
+    mape_test = mean_absolute_percentage_error(data_true[train_size:],data_predict[train_size:])
+    r2_test = r2_score(data_true[train_size:],data_predict[train_size:])
+    if not mute:
+      print("Train: using sklearn-metrics")
+      print("MSE:{:.4f},RMSE:{:.4f},MAE:{:.4f},MAPE:{:.4f},R2:{:.4f}".format(mse_train, rmse_train, mae_train, mape_train, r2_train))
+      print("Test: using sklearn-metrics")
+      print("MSE:{:.4f},RMSE:{:.4f},MAE:{:.4f},MAPE:{:.4f},R2:{:.4f}".format(mse_test, rmse_test, mae_test, mape_test, r2_test))
+      # print(np.around(mse_test,decimals=4),np.around(mae_test,decimals=4),np.around(mape_test,decimals=4),np.around(r2_test,decimals=4))  # 2.2719309220510002 1.182904648034428 -1.7949149334803214
+    return mse_train, rmse_train, mae_train, mape_train, r2_train, mse_test, rmse_test, mae_test, mape_test, r2_test
+```
+
+```{python Save Performance Metrics }
+#| echo = FALSE
+def Metrics(features,inputfilepath,outputfilepath,trial_num,seqs,epoch):
+  """
+  Training the LSTM model with data in the inputfilepath(xlsx file with a DataFrame structure) many times without set seed and save performance metrics to the outputfilepath
+  :param features: all the variables that are used for the input of the model, the first one is the response, others are the predictors
+  :param inputfilepath: input data file is a xlsx file
+  :param outputfilepath: output file store the performance metrics of LSTM models
+  :param trial_num: the times a LSTM model is trained without seting seed
+  :param seqs: the looking back steps in the LSTM models, has the form like [1,2,3,4]
+  :param epoch: epoch numbers in the LSTM model
+  """
+  
+  ##### cancel seed in train()######
+  dt,scaler = read_data(features,inputfilepath)
+  if os.path.isfile(outputfilepath):
+    os.remove(outputfilepath)
+  df1 = pd.DataFrame()
+  df1.to_excel(outputfilepath)
+  #df1.to_csv(outputfilepath)
+  DF = pd.DataFrame()
+  ##################
+  for seq in seqs:
+      mse, rmse, mae, mape, r2 = [], [], [], [], []
+      mseT, rmseT, maeT, mapeT, r2T = [], [], [], [], []
+      for trial in range(trial_num): 
+        print("##################### seq = {} trial = {} ############################".format(seq,trial+1))
+        dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size = split_dataset(dt, seq)
+        train_sizes.append(train_size)
+        nn_net, loss_show = train_model(feature_size, train_x, train_y, train_size, epoch)
+        data_predict, data_true = test_model(nn_net, dataY, torch_dataX,scaler)
+        mse_train, rmse_train, mae_train, mape_train, r2_train, mse_test, rmse_test, mae_test, mape_test, r2_test = performance_metrics2(data_predict, data_true, train_size)
+        mse.append(mse_train)
+        rmse.append(rmse_train)
+        mae.append(mae_train)
+        mape.append(mape_train)
+        r2.append(r2_train)
+        mseT.append(mse_test)
+        rmseT.append(rmse_test)
+        maeT.append(mae_test)
+        mapeT.append(mape_test)
+        r2T.append(r2_test ) 
+      train_sizes.append(train_size)  
+      df = pd.DataFrame({'MSE': mse, 'MSET':mseT, 'RMSE':rmse,'RMSET':rmseT,
+                         'MAE': mae, 'MAET':maeT,'MAPE':mape,'MAPET':mapeT,
+                         'R2':r2, 'R2T':r2T}, dtype='float32')
+      df["seq"] = seq
+      DF = pd.concat([DF, df], ignore_index=True)
+  with pd.ExcelWriter(outputfilepath,mode="a",engine='openpyxl', if_sheet_exists='replace') as writer:
+    DF.to_excel(writer, index=False)
+  # DF.to_csv(outputfilepath,index=False)      
+```
+
+```{python Save Predictive Data}
+#| echo = FALSE
+
+def LSTM_Predict(features,inputfilepath,outputfilepath,sheet_name,trial_num,seqs,epoch):
+  
+  """
+  Training the LSTM model with data in the inputfilepath(xlsx file with a DataFrame structure) many times without set seed and save the predictive values in the outputfilepath
+  :param features: all the variables that are used for the input of the model, the first one is the response, others are the predictors
+  :param inputfilepath: input data file is a xlsx file
+  :param outputfilepath: output file store the performance metrics of LSTM models
+  :param trial_num: the times a LSTM model is trained without seting seed
+  :param seqs: the looking back steps in the LSTM models, has the form like [1,2,3,4]
+  :param epoch: epoch numbers in the LSTM model
+  """
+  
+  ##### cancel seed in train()######
+  dt,scaler = read_data(features,inputfilepath,sheet_name=sheet_name)
+  if os.path.isfile(outputfilepath):
+      os.remove(outputfilepath)
+  df1 = pd.DataFrame()
+  df1.to_excel(outputfilepath)
+  for seq in seqs:
+      
+      
+      dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size = split_dataset(dt, seq,train_proportion = 1)
+      
+      df = pd.DataFrame()
+      for trial in range(trial_num): 
+        print("##################### seq = {} trial = {} ############################".format(seq,trial))
+        nn_net, loss_show = train_model(feature_size, train_x, train_y, train_size, epoch)
+        data_predict, data_true = test_model(nn_net, dataY, torch_dataX,scaler)
+        df['true{}'.format(trial+1)]= data_true.flatten()
+        df['predict{}'.format(trial+1)]= data_predict.flatten()
+      
+      with pd.ExcelWriter(outputfilepath,mode="a") as writer:
+        df.to_excel(writer, index=False, sheet_name="seq={}".format(seq))
+        
+
+```
+
+
+
+```{python LIME_LSTM}
+
+
+
+
+def LimeLstm(inputfilepath, features, seq, epoch, instance): 
+  """
+  Training the LSTM model with data in the inputfilepath(xlsx file with a DataFrame structure) and apply LIME to the model, return the model evaluation for one instance. 
+  :param features: all the variables that are used for the input of the LSTM model, the first one is the response, others are the predictors
+  :param inputfilepath: input data file is a xlsx file
+  :param outputfilepath: output file store the performance metrics of LSTM models
+  :param trial_num: the times a LSTM model is trained without seting seed
+  :param seq: An integer; the looking back steps in the LSTM models
+  :param epoch: epoch numbers in the LSTM model
+  :param instance: an integer; the number of instance in the training data set, for instance of local LIME model
+  :return lime featrue importance values of one instance
+  """
+  dt,scaler = read_data(features,inputfilepath)
+  dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size = split_dataset(dt, seq,train_proportion = 1)
+  nn_net, loss_show = train_model(feature_size, train_x, train_y, train_size, epoch)
+  # data_predict, data_true = test_model(nn_net, dataY, torch_dataX,scaler)
+  train_x= train_x.cpu().numpy()
+  train_x = train_x.reshape(train_x.shape[0],train_x.shape[1]*train_x.shape[2])
+  test_x= test_x.cpu().numpy()
+  feature_names = np.tile(features[1:],seq)
+  num = [str(i) for i in range(seq)]
+  num = np.repeat(num,len(features)-1)
+  feature_names = [a + "Lag" + b for a, b in zip(feature_names, num)]
+  explainer = lime.lime_tabular.LimeTabularExplainer(train_x, feature_names=feature_names,verbose=True, mode='regression',discretize_continuous=False)
+  def PredictFN(Input_X):
+    Input_X = Input_X.reshape(-1,seq,len(features)-1)
+    Input_X = torch.from_numpy(Input_X).type(torch.float32)
+    Test_Net = nn_net.eval()
+    Test_Net = Test_Net.to("cpu")
+    return Test_Net(Input_X).detach().numpy()
+  
+  exp = explainer.explain_instance(train_x[instance,], predict_fn = PredictFN , num_features=len(feature_names))
+  row_data = {key: value for key, value in exp.as_list()}
+  ExpDF = pd.DataFrame([row_data])
+  return ExpDF
+
+
+
+def LimeLstm2(inputfilepath, features, seq, epoch): 
+  """
+  Training the LSTM model with data in the inputfilepath(xlsx file with a DataFrame structure) and apply LIME to the model, return the model evaluation for all training data. 
+  :param features: all the variables that are used for the input of the LSTM model, the first one is the response, others are the predictors
+  :param inputfilepath: input data file is a xlsx file
+  :param outputfilepath: output file store the performance metrics of LSTM models
+  :param trial_num: the times a LSTM model is trained without seting seed
+  :param seq: An integer; the looking back steps in the LSTM models
+  :param epoch: epoch numbers in the LSTM model
+  :return ExpDF: a pd.DataFrame that contain all LIME feature importance values for all traing data
+  """
+  dt,scaler = read_data(features,inputfilepath)
+  dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size = split_dataset(dt, seq,train_proportion = 1)
+  nn_net, loss_show = train_model(feature_size, train_x, train_y, train_size, epoch)
+  # data_predict, data_true = test_model(nn_net, dataY, torch_dataX,scaler)
+  train_x= train_x.cpu().numpy()
+  train_x = train_x.reshape(train_x.shape[0],train_x.shape[1]*train_x.shape[2])
+  
+  feature_names = np.tile(features[1:],seq)
+  num = [str(i) for i in range(seq)]
+  num = np.repeat(num,len(features)-1)
+  feature_names = [a + "Lag" + b for a, b in zip(feature_names, num)]
+  explainer = lime.lime_tabular.LimeTabularExplainer(train_x, feature_names=feature_names,verbose=True, mode='regression',discretize_continuous=False)
+  
+  def PredictFN(Input_X):
+    Input_X = Input_X.reshape(-1,seq,len(features)-1)
+    Input_X = torch.from_numpy(Input_X).type(torch.float32)
+    Test_Net = nn_net.eval()
+    Test_Net = Test_Net.to("cpu")
+    return Test_Net(Input_X).detach().numpy()
+  
+  ###############################################
+  # give LIME values for all instances in the training dataset
+  
+  ExpDF = pd.DataFrame(columns = feature_names)
+  for j in range(len(train_x)):
+    exp = explainer.explain_instance(train_x[j,], predict_fn = PredictFN , num_features=len(feature_names))
+    row_data = {key: value for key, value in exp.as_list()}
+    ExpDF.loc[len(ExpDF)]=row_data
+    
+  ########################### read date column
+  df = pd.read_excel(inputfilepath, engine='openpyxl') 
+  datedf = df['date']
+  datedf = datedf.iloc[seq-1:len(datedf)]
+  datedf = datedf.reset_index()
+  ExpDF['date'] = datedf['date']
+  return ExpDF
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+Citylevel_limeDF <- function(csvfilepath){
+  
+  LimeDF <- read.csv(csvfilepath,row.names = NULL)
+  LimeDF$date <- as.character(LimeDF$date)
+  LimeDF$date <- as.Date(LimeDF$date,format="%Y%m%d")
+  DF <- pivot_longer(LimeDF,cols =1:(ncol(LimeDF)-1), names_to = "feature",values_to = "LIMEvalue" )
+  
+  # separate the feature name as predictor and lag
+  SepFeat<- function(string){regmatches(string, gregexpr("^[a-zA-Z0-9]+(?=Lag)|Lag\\d+$", string, perl = TRUE))[[1]]}
+  result <- lapply(DF$feature, SepFeat)
+  result <- do.call(rbind, result)  # Bind rows
+  result <- as.data.frame(result)        # Convert to data.frame
+  colnames(result) <- c("predictor", "Lag") # Optional: Name columns
+  DF <- cbind(DF,result)
+  
+  # add Warm or Cold label
+  WorC <- function(date){
+    if (as.numeric(format(date,"%m"))>3 & as.numeric(format(date,"%m")<10 )) {return("Warm")}
+    else {return("Cold")}
+  }
+  woc <- lapply(DF$date,WorC)
+  woc <- do.call(rbind,woc)
+  woc <- as.data.frame(woc)
+  names(woc) <- "WoC"
+  DF <- cbind(DF,woc)
+  
+  LimeDF <- DF
+  return(LimeDF)
+}
+
+
+
+Citylevel_limeDF3 <- function(csvfilepath){
+  
+  LimeDF <- read.csv(csvfilepath,row.names = NULL)
+  LimeDF$date <- as.character(LimeDF$date)
+  LimeDF$date <- as.Date(LimeDF$date,format="%Y-%m-%d")
+  DF <- pivot_longer(LimeDF,cols =1:(ncol(LimeDF)-1), names_to = "feature",values_to = "LIMEvalue" )
+  
+  # separate the feature name as predictor and lag
+  SepFeat<- function(string){regmatches(string, gregexpr("^[a-zA-Z0-9]+(?=Lag)|Lag\\d+$", string, perl = TRUE))[[1]]}
+  result <- lapply(DF$feature, SepFeat)
+  result <- do.call(rbind, result)  # Bind rows
+  result <- as.data.frame(result)        # Convert to data.frame
+  colnames(result) <- c("predictor", "Lag") # Optional: Name columns
+  DF <- cbind(DF,result)
+  
+  # add Warm or Cold label
+  WorC <- function(date){
+    if (as.numeric(format(date,"%m"))>3 & as.numeric(format(date,"%m")<10 )) {return("Warm")}
+    else {return("Cold")}
+  }
+  woc <- lapply(DF$date,WorC)
+  woc <- do.call(rbind,woc)
+  woc <- as.data.frame(woc)
+  names(woc) <- "WoC"
+  DF <- cbind(DF,woc)
+  
+  LimeDF <- DF
+  return(LimeDF)
+}
+```
+
+```{python}
+  
+citynames =["la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil"]
+features = ["death","tmpd","pm10orig","o3orig"]
+path = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final"
+seq = 5
+epoch = 8000
+
+for cityname in citynames :
+  inputfilepath = path + "/"+ cityname+".xlsx"
+  LimeDF = LimeLstm2(inputfilepath, features, seq, epoch)
+  LimeDF.to_csv("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/"+cityname+"_lime_epoch8000_seq5.csv",index = False)
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME"
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+LimeDF10Cities <- data_frame(date = as.Date(0), feature = NA, LIMEvalue = NA, predictor = NA, Lag = NA, WoC = NA,city = NA, death = NA, tmpd = NA, pm10orig=NA, o3orig=NA, dow=NA)
+origfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final"
+for (cityname in citynames){
+  csvfilepath <-  paste0(filepath,"/",cityname,"_lime_epoch8000_seq5.csv")
+  LimeDF <- Citylevel_limeDF(csvfilepath)
+  LimeDF$city <- rep(cityname,length(LimeDF))
+  
+  origDF <- read_xlsx(paste0(origfilepath,"/",cityname,".xlsx"))
+  origDF$date <- as.character(origDF$date)
+  origDF$date <- as.Date(origDF$date,format="%Y%m%d")
+  origDF$date <- as.character(origDF$date)
+  LimeDF$date <- as.character(LimeDF$date)
+  DF <- dplyr::left_join(LimeDF,origDF,by='date')
+  
+  LimeDF10Cities <- rbind(LimeDF10Cities,DF)
+}
+LimeDF10Cities <- LimeDF10Cities[-1,]
+
+LimeDF10Cities$date <- as.Date(LimeDF10Cities$date,format="%Y%m%d")
+LimeDF10Cities$year <- format(LimeDF10Cities$date,"%Y")
+LimeDF10Cities$month <- format(LimeDF10Cities$date,"%m")
+# write.csv(LimeDF10Cities,file = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/US10Cities_epoch8000_seq5.csv") 
+summary(LimeDF10Cities)
+```
+
+```{r}
+# the LIME importance of the three predictors are distinctively different in each city
+LimeDF10Cities <- read.csv("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/US10Cities_epoch8000_seq5.csv")
+DF <- LimeDF10Cities
+ggplot(DF)+
+  geom_boxplot(aes(y=LIMEvalue,color=predictor))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city,nrow = 3)
+
+# DF <- LimeDF10Cities[LimeDF10Cities$Lag=="Lag0",]
+# ggplot(DF)+
+#   geom_boxplot(aes(y=LIMEvalue,color=predictor))+
+#   geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+#   facet_wrap(~city,nrow = 3)
+
+DF <- LimeDF10Cities[LimeDF10Cities$Lag=="Lag1",]
+ggplot(DF)+
+  geom_boxplot(aes(y=LIMEvalue,color=predictor))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city,nrow = 3)
+
+DF <- LimeDF10Cities[LimeDF10Cities$Lag=="Lag2",]
+ggplot(DF)+
+  geom_boxplot(aes(y=LIMEvalue,color=predictor))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city,nrow = 3)
+
+DF <- LimeDF10Cities[LimeDF10Cities$Lag=="Lag3",]
+ggplot(DF)+
+  geom_boxplot(aes(y=LIMEvalue,color=predictor))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city,nrow = 3)
+
+DF <- LimeDF10Cities[LimeDF10Cities$Lag=="Lag4",]
+ggplot(DF)+
+  geom_boxplot(aes(y=LIMEvalue,color=predictor))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city,nrow = 3)
+
+## Except Lag0, all the other Lags have similar average Lime values and variances for the feature-differences. 
+```
+
+
+
+```{r}
+# the overall 'Lag' influence differences 
+DF <- LimeDF10Cities %>% filter(Lag=="Lag0" | Lag=="Lag1"| Lag=="Lag2" )
+ggplot(DF)+
+  geom_point(aes(x=tmpd, y=LIMEvalue, color=Lag),alpha=0.8)+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_grid(rows = vars(predictor),cols=vars(city))
+  # facet_wrap(~predictor)
+```
+
+
+```{r}
+# For each predictor, the "Lag" importance are also different
+DF <- LimeDF10Cities %>% filter(city=="dlft")
+ggplot(DF)+
+  geom_boxplot(aes(x=predictor,y=LIMEvalue,color=Lag))+
+  labs(y="LIME value for Dallas")
+DF <- LimeDF10Cities %>% filter(city=="ny")
+ggplot(DF)+
+  geom_boxplot(aes(x=predictor,y=LIMEvalue,color=Lag))+
+  labs(y="LIME value for New York")
+
+```
+
+```{r}
+# The "O3" predictor are more important at colder temperatures 
+
+DF <- LimeDF10Cities %>% filter(predictor=="o3orig")
+ggplot(DF)+
+  geom_point(aes(x=tmpd, y=LIMEvalue, color=Lag),alpha=0.8)+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city)
+
+
+
+DF <- LimeDF10Cities %>% filter(city=="dlft") %>% filter(predictor=="o3orig") %>% filter(Lag=="Lag0")
+ggplot(DF)+
+  geom_point(aes(x = tmpd , y=abs(LIMEvalue),color=WoC,shape=WoC))+
+  geom_smooth(aes(x = tmpd, y = abs(LIMEvalue)), method = "lm", se = FALSE,linewidth=0.6) + 
+  #geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  labs(y="LIME Value for Ozone and Lag 0", x="Temperature (Fahrenheit)")+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  ) 
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMEO3~temp.png",height = 4,width = 6,dpi = 500)
+
+
+
+```
+```{r}
+# The "PM10" predictor are more important at colder temperatures too 
+
+
+DF <- LimeDF10Cities %>% filter(predictor=="pm10orig")
+ggplot(DF)+
+  geom_point(aes(x=tmpd, y=LIMEvalue, color=Lag),alpha=0.8)+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  facet_wrap(~city)
+  
+
+
+# for city "hous"
+# PM10LIMEvalue~ date
+DF <- LimeDF10Cities %>%  filter(city=="hous") %>% filter(predictor=="pm10orig") %>% mutate(year_season=ifelse(as.numeric(month)>=10, as.numeric(year)+1,as.numeric(year)))
+lag_mapping <- c("Lag0" = "Lag0", "Lag1" = "Lag6", "Lag2" = "Lag12", "Lag3" = "Lag18", "Lag4" = "Lag24")
+DF <- DF %>%
+  mutate(Lag = recode(Lag, !!!lag_mapping),
+         Lag = factor(Lag, levels = c("Lag0", "Lag6", "Lag12", "Lag18","Lag24")))
+ggplot(DF)+
+  geom_line(aes(x= date, y= abs(LIMEvalue),color=WoC, group = interaction(WoC,year_season)))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  labs(y="LIME Value for PM10",
+       x="Date",
+       color="Season")+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  ) +
+  facet_grid(rows=vars(Lag))+  
+  theme(
+    legend.position = "bottom"
+    ) 
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMEPM10~date.png",dpi = 500)
+
+# PM10LIMEvalue~ date
+# Zoom in the first 2 years with Lag0  
+DF <- LimeDF10Cities %>% filter(year=="1987"|year=="1988")%>% filter(Lag=="Lag0")%>%  filter(city=="hous")%>% filter(predictor=="pm10orig")
+lag_mapping <- c("Lag0" = "Lag0", "Lag1" = "Lag6", "Lag2" = "Lag12", "Lag3" = "Lag18", "Lag4" = "Lag24")
+DF <- DF %>%
+  mutate(Lag = recode(Lag, !!!lag_mapping),
+         Lag = factor(Lag, levels = c("Lag0", "Lag6", "Lag12", "Lag18","Lag24")))
+ggplot(DF) +
+  geom_point(aes(x = date, y = abs(LIMEvalue), color = WoC, shape = WoC)) +
+  geom_hline(yintercept = 0, color = 'black', linetype = "dashed", linewidth = 0.3) +
+  labs(y = "LIME Value for PM10 and Lag0", color = "Season", shape = "Season") +
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  )+
+  theme(legend.position = "bottom")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMEPM10~dateZoomin.png",height = 4,    width = 6,dpi = 500)
+# add the temprature for that time period
+# ggplot(DF)+
+#   geom_line(aes(x= date, y= tmpd))+
+#   geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)
+ 
+
+
+
+ 
+
+# PM10LIMEvalue~tmpd
+DF <- LimeDF10Cities %>% filter(city=="hous") %>% filter(predictor=="pm10orig")
+lag_mapping <- c("Lag0" = "Lag0", "Lag1" = "Lag6", "Lag2" = "Lag12", "Lag3" = "Lag18", "Lag4" = "Lag24")
+DF <- DF %>%
+  mutate(Lag = recode(Lag, !!!lag_mapping),
+         Lag = factor(Lag, levels = c("Lag0", "Lag6", "Lag12", "Lag18","Lag24")))
+
+ggplot(DF)+
+  geom_point(aes(x = tmpd , y=abs(LIMEvalue),color=Lag,shape=Lag))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  labs(y="LIME Value for PM10")
+
+DF <- LimeDF10Cities %>% filter(city=="hous") %>% filter(predictor=="pm10orig")%>%filter(Lag!="Lag4"&Lag!="Lag3"&Lag!="Lag2")
+lag_mapping <- c("Lag0" = "Lag0", "Lag1" = "Lag6", "Lag2" = "Lag12", "Lag3" = "Lag18", "Lag4" = "Lag24")
+DF <- DF %>%
+  mutate(Lag = recode(Lag, !!!lag_mapping),
+         Lag = factor(Lag, levels = c("Lag0", "Lag6", "Lag12", "Lag18","Lag24")))
+ggplot(DF)+
+  geom_point(aes(x = tmpd , y=abs(LIMEvalue),color=Lag,shape=Lag))+
+  geom_smooth(aes(x = tmpd, y = abs(LIMEvalue), color = Lag), method = "lm", se = FALSE,linewidth=0.6) + 
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  labs(y="LIME Value for PM10", x="Temperature (Fahrenheit)" )+
+  theme(legend.position = "bottom")
+  
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMEPM10~temp.png",height = 6, width = 7,dpi = 500)
+# Fit linear models for each Lag
+lm_results <- DF %>%
+  group_by(Lag) %>%
+  do(model = lm(abs(LIMEvalue) ~ tmpd, data = .))  # Fit linear model for each group
+lm_results$summary <- lapply(lm_results$model, summary)  # Get summaries of each model
+lm_results$summary
+
+
+# for the city "sand"  
+DF <- LimeDF10Cities %>% filter(city=="sand") %>% filter(predictor=="pm10orig")%>% filter(Lag=="Lag0")
+ggplot(DF)+
+  geom_point(aes(x = tmpd , y=abs(LIMEvalue)))+
+  geom_smooth(aes(x = tmpd, y = abs(LIMEvalue)), method = "lm", se = FALSE,linewidth=0.6) + 
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  labs(y="LIME Value for PM10 and Lag 0 ", x= "Temperature (Fahrenheit)")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMEPM10~temp-sand.png",height = 4,    width = 6,dpi = 500)
+```
+```{r}
+# The LIME importance of "Temperature" doesn't show change over 'temperature'
+# The LIME importance of "PM10" doesn't show change over 'PM10'
+# The LIME importance of "O3" doesn't show change over 'O3'
+DF <- LimeDF10Cities %>% filter(city=="dlft") %>% filter(predictor=="tmpd") %>% filter(Lag!="Lag0")
+ggplot(DF)+
+  geom_point(aes(x = tmpd , y=LIMEvalue,color=Lag))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  labs(y="LIME Value for tmpd at Dallas")
+
+
+DF <- LimeDF10Cities %>% filter(predictor=="tmpd") 
+ggplot(DF)+
+  geom_point(aes(x = tmpd,y=LIMEvalue, color=Lag))+
+  facet_wrap(~city,nrow=3)+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  labs(y="LIME Value for tmpd")
+
+
+DF <- LimeDF10Cities %>% filter(predictor=="pm10orig")
+ggplot(DF)+
+  geom_point(aes(x = pm10orig,y=LIMEvalue, color=Lag))+
+  facet_wrap(~city,nrow=3)+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  labs(y="LIME Value for PM10")
+
+
+DF <- LimeDF10Cities %>% filter(predictor=="o3orig") 
+ggplot(DF)+
+  geom_point(aes(x = o3orig,y=LIMEvalue, color=Lag))+
+  facet_wrap(~city,nrow=3)+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.1)+
+  labs(y="LIME Value for O3")
+
+```
+
+```{r}
+#| label:chic  data
+csvfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/chic_lime_epoch5000_seq4_pm10Only.csv"
+Chic_DF <- Citylevel_limeDF3(csvfilepath)
+str(Chic_DF)
+ggplot(Chic_DF)+
+  geom_boxplot(aes(x=predictor,y=abs(LIMEvalue),color = Lag))
+# Chic data with PM10 only
+```
+```{python}
+
+features = ["death","pm10mean","o3mean","comean","no2mean","tmpd"]
+path = "~/deeplearning/LSTM_Test/LSTM_Test/nmmaps_chic_1987_2000.xlsx"
+seq = 5
+epoch = 8000
+LimeDF = LimeLstm2(inputfilepath=path, features=features, seq=seq, epoch=epoch)
+LimeDF.to_csv("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/chic_lime_epoch8000_seq5_4ap.csv",index = False)
+
+```
+
+```{r}
+# Chic model with temperature and PM10
+csvfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/chic_lime_epoch5000_seq4_pm10Only.csv"
+
+
+LimeDF <- read.csv(csvfilepath,row.names = NULL)
+LimeDF$date <- as.character(LimeDF$date)
+LimeDF$date <- as.Date(LimeDF$date,format="%Y-%m-%d")
+DF <- pivot_longer(LimeDF,cols =1:(ncol(LimeDF)-1), names_to = "feature",values_to = "LIMEvalue" )
+
+# separate the feature name as predictor and lag
+SepFeat<- function(string){regmatches(string, gregexpr("^[a-zA-Z0-9]+(?=Lag)|Lag\\d+$", string, perl = TRUE))[[1]]}
+result <- lapply(DF$feature, SepFeat)
+result <- do.call(rbind, result)  # Bind rows
+result <- as.data.frame(result)        # Convert to data.frame
+colnames(result) <- c("predictor", "Lag") # Optional: Name columns
+DF <- cbind(DF,result)
+
+# add Warm or Cold label
+WorC <- function(date){
+  if (as.numeric(format(date,"%m"))>4 & as.numeric(format(date,"%m")<10 )) {return("Warm")}
+  else {return("Cold")}
+}
+woc <- lapply(DF$date,WorC)
+woc <- do.call(rbind,woc)
+woc <- as.data.frame(woc)
+names(woc) <- "WoC"
+DF <- cbind(DF,woc)
+
+DF$LIMEvalueAB <- abs(DF$LIMEvalue)
+# DF$date <- as.Date(DF$date,format="%Y%m%d")
+DF$year <- format(DF$date,"%Y")
+DF$month <- format(DF$date,"%m")
+
+ggplot(DF)+
+  geom_line(aes(x=date,y=LIMEvalueAB,color=WoC,group=interaction(year,WoC)))+
+  facet_wrap(~Lag,nrow = 4)+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  )+
+  theme_minimal() +
+  # theme(legend.position = "none") +
+  labs(y="LIME values for PM10")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMELag~date.png",dpi = 500)  
+
+ggplot(DF)+
+  geom_boxplot(aes(x=Lag,y=LIMEvalueAB),color='navyblue')+
+  labs(y="LIME values for PM10")
+  # theme_minimal() 
+  # scale_y_continuous(limits = c(-0.1,0.3))
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMELag.png",height = 4,width = 6,dpi = 500)
+
+
+
+
+
+```
+
+```{r}
+## add the original data to the LIME data.frame for Chicago 
+csvfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/chic_lime_epoch8000_seq5_4ap.csv"
+origfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/nmmaps_chic_1987_2000.xlsx"
+LimeDF <- Citylevel_limeDF3(csvfilepath)
+LimeDF$city <- rep("chic",nrow(LimeDF))
+LimeDF <- LimeDF %>% mutate(predictor = case_when(
+  predictor == "pm10mean" ~ "PM10",
+  predictor == "o3mean" ~ "O3",
+  predictor == "comean" ~ "CO",
+  predictor == "no2mean" ~ "NO2",
+  predictor == "tmpd" ~ "Temperature",
+  TRUE ~ predictor
+))
+origDF <- read_xlsx(origfilepath,.name_repair = "unique_quiet")
+origDF <- origDF[,-c(1,2)]
+origDF$date <- as.character(origDF$date)
+origDF$date <- as.Date(origDF$date,format="%Y-%m-%d")
+origDF$date <- as.character(origDF$date)
+LimeDF$date <- as.character(LimeDF$date)
+chicLimeDF <- dplyr::left_join(LimeDF,origDF,by='date')
+chicLimeDF$date <- as.Date(chicLimeDF$date,format="%Y-%m-%d")
+summary(chicLimeDF)
+#write.csv(chicLimeDF,file = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/CHICLime_epoch8000_seq5_4ap.csv")
+```
+```{r}
+# Chicago model with 4 APs for LIME
+# chicLimeDF <- read.csv("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/CHICLime_epoch8000_seq5_4ap.csv")
+#library(lubridate)
+library(gridExtra) 
+
+
+
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag0") %>% filter(predictor!="Temperature")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=predictor))+
+  facet_grid(predictor~.)+
+  ylab("Lime Value for Lag 0 ")+
+  theme(legend.position = "none")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_chic4AP_Lag0~date.png",dpi = 500)  
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag1") %>% filter(predictor!="Temperature") 
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=predictor))+
+  facet_grid(predictor~.)+
+  ylab("Lime Value for Lag 1 ")+
+  theme(legend.position = "none")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_chic4AP_Lag1~date.png",dpi = 500)  
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag2")  %>% filter(predictor!="Temperature")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=predictor))+
+  facet_grid(predictor~.)+
+  ylab("Lime Value for Lag 2 ")+
+  theme(legend.position = "none")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_chic4AP_Lag2~date.png",dpi = 500)  
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag3")  %>% filter(predictor!="Temperature")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=predictor))+
+  facet_grid(predictor~.)+
+  ylab("Lime Value for Lag 3 ")+
+  theme(legend.position = "none")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_chic4AP_Lag3~date.png",dpi = 500)  
+
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag4")  %>% filter(predictor!="Temperature")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=predictor))+
+  facet_grid(predictor~.)+
+  ylab("Lime Value for Lag 4 ")+
+  theme(legend.position = "none")
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_chic4AP_Lag4~date.png",dpi = 500)
+
+DF <- chicLimeDF %>% filter(date==as.Date("1987-01-05")) %>% filter(predictor!="Temperature")
+plot1 <- ggplot(DF, aes(x = Lag, y = LIMEvalue,color=predictor,fill=predictor)) +
+  geom_bar(stat = "identity",position = "dodge",color="lightgrey") +
+  coord_flip() +
+  labs( y = "LIME Value for Instance A") +
+  ylim(-0.10,0.06)+
+  scale_fill_discrete(name="air pollutants")+
+  theme_minimal()+
+  theme(legend.position = c(0.2, 0.85),  
+        legend.key = element_blank())
+DF <- chicLimeDF %>% filter(date==as.Date("1996-12-01")) %>% filter(predictor!="Temperature")
+plot2 <- ggplot(DF, aes(x = Lag, y = LIMEvalue,color=predictor,fill=predictor)) +
+  geom_bar(stat = "identity",position = "dodge",color="lightgrey") +
+  coord_flip() +
+  labs(y = "LIME Value for Instance B") +
+  ylim(-0.10,0.06)+
+  theme_minimal()+
+  theme(legend.position="none",axis.title.y = element_blank())
+combplot <- arrangeGrob(plot1, plot2, ncol = 2)
+combplot
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_instance.png",plot=combplot,dpi = 500)
+
+
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag0") %>% filter(predictor!="Temperature") %>% mutate(year=factor(format(date,"%Y")))%>% mutate(month=factor(format(date,"%m")))
+
+monthly_avg <- DF %>%
+  group_by(YMonth,predictor,Lag) %>%
+  summarize(Month_avg_LIMEvalue = mean(LIMEvalue,na.rm = TRUE))
+DF <- DF %>%
+  left_join(monthly_avg, by = c("YMonth", "predictor", "Lag"))
+
+DF %>% ggplot() +
+  geom_boxplot(aes(x=YMonth, y = LIMEvalue,group=YMonth,color=WoC),outlier.size = 0.5) +
+  geom_line(aes(x=YMonth,y=Month_avg_LIMEvalue,color="Monthly Average"),linewidth = 0.7) +
+  facet_grid(predictor ~ .) +
+  scale_color_manual(
+    name="",
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3", "Monthly Average" = "gold3"),
+    labels = c( "Cold Season",  "Monthly Average","Warm Season")
+  ) +
+  xlab("Time") +
+  ylab("LIME Value Grouped by Month for Lag 0 ") +
+  theme(axis.text.x = element_text( vjust = 0.5, hjust = 1),
+        axis.text.y = element_text( angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_monthly.png",dpi = 500) 
+  
+
+ 
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month"),Year_floor = floor_date(date, "year")) %>% filter(predictor=="O3") %>%  mutate(year=as.numeric(format(date,"%Y")))%>% mutate(month=factor(format(date,"%m"))) 
+yearly_avg <- DF %>%
+  group_by(year,predictor,Lag) %>%
+  summarize(Year_avg_LIMEvalue = mean(LIMEvalue,na.rm = TRUE))
+DF <- DF %>%
+  left_join(yearly_avg, by = c("year", "predictor", "Lag"))
+
+DF %>% ggplot() +
+  geom_line(aes(x=Year_floor, y=Year_avg_LIMEvalue,color=Lag))+
+  geom_point(aes(x=Year_floor, y=Year_avg_LIMEvalue,color=Lag))+
+  geom_smooth(method="loess",se=T,span=0.5,aes(x=YMonth,y=LIMEvalue,group=Lag),linetype=0,fullrange=F,level=0.95)+
+  scale_color_brewer(palette="Set2")+
+  xlab("Time")+
+  ylab("LIME Value for Ozone")+
+  theme_minimal()+
+  theme(
+    legend.position = c(0.8,0.7), # Set legend position to bottom
+    legend.direction = "vertical", # Arrange legend items horizontally
+    legend.title = element_blank(), # Remove legend title
+    axis.text.y = element_text(angle = 45, hjust = 1)
+  ) +
+  guides(color = guide_legend(ncol = 3))
+  
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_O3.png",height=6,width=7,dpi = 500) 
+```
+```{r}
+# Chicago 4AP model yearly LIME
+
+# O3:  Lag 1,2,4: abs(LIME)<0.01
+# NO2: Lag 1,2,4:  abs(LIME)<0.007
+# CO:  Lag 1,2,3: abs(LIME)<0.009
+# Temperature: 
+
+
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month"),Year_floor = floor_date(date, "year")) %>% filter(predictor=="O3") %>%  mutate(year=as.numeric(format(date,"%Y")))%>% mutate(month=factor(format(date,"%m"))) 
+yearly_avg <- DF %>%
+  group_by(year,predictor,Lag) %>%
+  summarize(Year_avg_LIMEvalue = mean(LIMEvalue,na.rm = TRUE))
+DF <- DF %>%
+  left_join(yearly_avg, by = c("year", "predictor", "Lag"))
+
+DF %>% ggplot() +
+  geom_line(aes(x=Year_floor, y=Year_avg_LIMEvalue,color=Lag))+
+  geom_point(aes(x=Year_floor, y=Year_avg_LIMEvalue,color=Lag))+
+  geom_smooth(method="loess",se=T,span=0.5,aes(x=YMonth,y=LIMEvalue,group=Lag),linetype=0,fullrange=F,level=0.95)+
+  scale_color_brewer(palette="Set2")+
+  xlab("Time")+
+  ylab("LIME Value for Ozone")+
+  theme_minimal()+
+  theme(
+    legend.position = c(0.8,0.7), # Set legend position to bottom
+    legend.direction = "vertical", # Arrange legend items horizontally
+    legend.title = element_blank(), # Remove legend title
+    axis.text.y = element_text(angle = 45, hjust = 1)
+  ) +
+  guides(color = guide_legend(ncol = 3))
+
+```
+
+
+
