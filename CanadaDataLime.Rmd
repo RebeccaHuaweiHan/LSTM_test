@@ -1,0 +1,993 @@
+```{r}
+load("~/deeplearning/LSTM_Test/Canada/AHIdat_temp.rda")
+load("~/deeplearning/LSTM_Test/Canada/AHIdat_mort_morb.rda")
+load("~/deeplearning/LSTM_Test/Canada/AHIdat_ap.rda")
+```
+```{r}
+identical(names(AHIdat_ap),names(AHIdat_mort_morb))
+identical(names(AHIdat_temp),names(AHIdat_mort_morb))
+identical(names(AHIdat_temp),names(AHIdat_ap))
+
+length(AHIdat_ap)
+length(AHIdat_temp)
+length(AHIdat_mort_morb)
+names(AHIdat_mort_morb)
+for( name in names(AHIdat_mort_morb)){
+  print(name)
+  print(length(AHIdat_ap[[name]][["Date"]]))
+  print(summary(AHIdat_ap[[name]][["kPM10.24hm.lag0"]]))
+  print(summary(AHIdat_ap[[name]][["cPM10.24hm.lag0"]]))
+  print(summary(AHIdat_ap[[name]][["nPM10.24hm.lag0"]]))
+  print(summary(AHIdat_mort_morb[[name]][["Mort.Circ.b.A0"]]))
+}
+# CD with large average "Mort.Circ.b.A0" : 3520(Toronto) 5915(Greater Vancouver)
+# In AHIdat_ap, n is raw; c is one-step interpolated; k is two-step. k is what we use for most models
+for( name in c("3520","3525","4811","5915")){
+  print(name)
+  print(length(AHIdat_temp[[name]][["date"]]))
+  print(summary(AHIdat_temp[[name]][["Temp.24hm.lag0"]]))
+  print(length(AHIdat_ap[[name]][["Date"]]))
+  print(summary(AHIdat_ap[[name]][["kPM10.24hm.lag0"]]))
+  print(summary(AHIdat_ap[[name]][["kNO2.24hm.lag0"]]))
+  print(summary(AHIdat_ap[[name]][["kPM25U.24hm.lag0"]]))
+  print(summary(AHIdat_ap[[name]][["kSO2.24hm.lag0"]]))
+  print(summary(AHIdat_ap[[name]][["kO3.24hm.lag0"]]))
+  print(summary(AHIdat_mort_morb[[name]][["Mort.Circ.b.A0"]]))
+}
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+
+CDlevel_dat <- function(filepath,name,ap_featue,outputfilepath){
+  # extract temperature, ap and mortality data into one data.frame for one CD, remove the NA rows,check whether the dates are consecutive
+  # name: the CD number
+  load(paste0(filepath,"/AHIdat_temp.rda"))
+  load(paste0(filepath,"/AHIdat_ap.rda"))
+  load(paste0(filepath,"/AHIdat_mort_morb.rda"))
+
+  if (is.null(AHIdat_temp[[name]])){
+    print(paste0(name,": the temp dataset doesn't exist."))
+    return()
+  }
+  DFT <- AHIdat_temp[[name]] %>% dplyr::select(date,Temp.24hm.lag0)
+  DFM <- AHIdat_mort_morb[[name]] %>% dplyr::select(Date,Mort.Circ.b.A0,Morb.Circ.b.A0)
+  if (is.null(AHIdat_ap[[name]])){
+    print(paste0(name,": the ap dataset doesn't exist."))
+    return()
+  }
+  DF <- AHIdat_ap[[name]] %>% dplyr::select(c("Date",ap_featue))
+  names(DFT)[1] <- "Date"
+  DF <- dplyr::left_join(DF,DFT,by="Date")
+  DF <- dplyr::left_join(DF,DFM,by="Date")
+  DF <- DF %>% na.omit()
+  
+  if (length(DF$Date)==0){
+    print(paste0(name,": the dataset is empty"))
+    return()
+  }
+ 
+  
+  start_date <- as.Date(DF$Date[1])
+  end_date <- as.Date(DF$Date[length(DF$Date)])
+  days_difference <- difftime(end_date, start_date, units = "days")
+  if (as.numeric(days_difference)+1==length(DF$Date)){print(paste0(name," : Dates are consecutive"))}
+  else{print(paste0(name," : Dates are not consecutive!!!!"))}
+  names(DF) <- c("date","PM10","O3","NO2","SO2","PM25U","Temp","Mort","Morb")
+  DF <- data.frame(Death=DF$Mort,DF)
+  writexl::write_xlsx(DF,path=paste0(outputfilepath,"/",name,"_complete.xlsx"))
+  
+}
+
+# ap_featue <- c("kPM10.24hm.lag0","kO3.24hm.lag0","kNO2.24hm.lag0","kSO2.24hm.lag0","kPM25U.24hm.lag0")
+# filepath <- "~/deeplearning/LSTM_Test/Canada"
+# outputfilepath <- "~/deeplearning/LSTM_Test/Canada/CDWithoutMissing"
+# load(paste0(filepath,"/AHIdat_mort_morb.rda"))
+# for( name in names(AHIdat_mort_morb)){
+#   CDlevel_dat(filepath,name,ap_featue,outputfilepath)
+# }
+
+
+
+
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+
+CDlevel_dat2 <- function(filepath,name,ap_featue,outputfilepath){
+  # extract temperature, ap and mortality data into one data.frame for one CD, remove the NA rows, return the time period that the dates are consecutive
+  # name: the CD number
+  load(paste0(filepath,"/AHIdat_temp.rda"))
+  load(paste0(filepath,"/AHIdat_ap.rda"))
+  load(paste0(filepath,"/AHIdat_mort_morb.rda"))
+
+  if (is.null(AHIdat_temp[[name]])){
+    print(paste0(name,": the temp dataset doesn't exist."))
+    return()
+  }
+  DFT <- AHIdat_temp[[name]] %>% dplyr::select(date,Temp.24hm.lag0)
+  DFM <- AHIdat_mort_morb[[name]] %>% dplyr::select(Date,Mort.Circ.b.A0,Morb.Circ.b.A0)
+  if (is.null(AHIdat_ap[[name]])){
+    print(paste0(name,": the ap dataset doesn't exist."))
+    return()
+  }
+  DF <- AHIdat_ap[[name]] %>% dplyr::select(c("Date",ap_featue))
+  names(DFT)[1] <- "Date"
+  DF <- dplyr::left_join(DF,DFT,by="Date")
+  DF <- dplyr::left_join(DF,DFM,by="Date")
+  DF <- DF %>% na.omit()
+  
+  if (length(DF$Date)==0){
+    print(paste0(name,": the dataset is empty"))
+    return()
+  }
+ 
+  
+  start_date <- as.Date(DF$Date[1])
+  end_date <- as.Date(DF$Date[length(DF$Date)])
+  days_difference <- difftime(end_date, start_date, units = "days")
+  if (as.numeric(days_difference)+1==length(DF$Date)){print(paste0(name," : Dates are consecutive"))}else{print(paste0(name," : Dates are not consecutive!!!!"))}
+  
+  DF$group <- c(0, cumsum(diff(DF$Date) != 1))
+  
+  longest_period <- DF %>% group_by(group) %>% summarise(start_date = min(Date), end_date = max(Date), length = n()) %>% arrange(desc(length)) %>% slice(1)
+  DF <- DF[DF$group == longest_period$group, ]
+  DF$group <- NULL
+  
+  names(DF) <- c("date","NO2","O3","Temp","Mort","Morb")
+  DF <- data.frame(Death=DF$Mort,DF)
+  
+  writexl::write_xlsx(DF,path=paste0(outputfilepath,"/",name,"_consecutive.xlsx"))
+  
+}
+
+# ap_featue <- c("kPM10.24hm.lag0","kO3.24hm.lag0") # Only PM10 and O3 are chosen for air pollutants
+# filepath <- "~/deeplearning/LSTM_Test/Canada"
+# outputfilepath <- "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays"
+# load(paste0(filepath,"/AHIdat_mort_morb.rda"))
+# for( name in names(AHIdat_mort_morb)){
+#   CDlevel_dat2(filepath,name,ap_featue,outputfilepath)
+# }
+
+# 8 CDs are chosen with at least 900-consecutive-day time period. CD codes are : "3520","3537","3539","4611","4806","4811","5915","5917" . "Toronto","Essex","Middlesex","ManitobaNo.11","AlbertaNo.6","AlbertaNo.11","GreaterVancouver","Capital"
+
+
+ap_featue <- c("kNO2.24hm.lag0","kO3.24hm.lag0") # Only NO2 and O3 are chosen for air pollutants
+filepath <- "~/deeplearning/LSTM_Test/Canada"
+outputfilepath <- "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3"
+load(paste0(filepath,"/AHIdat_mort_morb.rda"))
+for( name in names(AHIdat_mort_morb)){
+  CDlevel_dat2(filepath,name,ap_featue,outputfilepath)
+}
+
+
+# 9 CDs are chosen with at least 3000-consecutive-day time period: "3506", "3520", "3524", "3525", "3543", "4806", "4811", "5915", "5917" . 
+
+# c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe","4806"="Alberta No. 6","4811"="Alberta No. 11","5915"="Vancouver","5917"="Capital")
+
+
+
+```
+
+```{python}
+# # Lime vaules for 8 CDs in Canada dataset
+# inputfile = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive"
+# features = ["Death","PM10","O3","Temp"]
+# seq = 9
+# epoch = 8000
+# CDnames = ["3520","3537","3539","4611","4806","4811","5915","5917"]
+# for CDname in CDnames:
+#   inputfilepath = inputfile+"/"+CDname+"_consecutive.xlsx"
+#   LimeDF = LimeLstm2(inputfilepath, features, seq, epoch)
+#   LimeDF.to_csv(inputfile+"/"+CDname+"_lime_epoch8000_seq9.csv",index = False)
+  
+
+# Lime vaules for 9 CDs in Canada dataset
+inputfile = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3"
+features = ["Death","NO2","O3","Temp"]
+seq = 5
+epoch = 8000
+CDnames = ["3506", "3520", "3524", "3525", "3543", "4806", "4811", "5915", "5917" ]
+for CDname in CDnames:
+  inputfilepath = inputfile+"/"+CDname+"_consecutive.xlsx"
+  LimeDF = LimeLstm2(inputfilepath, features, seq, epoch)
+  LimeDF.to_csv(inputfile+"/"+CDname+"_lime_epoch8000_seq5.csv",index = False)
+
+
+```
+
+
+
+```{python}
+# inputfilepath = "~/deeplearning/LSTM_Test/Canada/GVancouver_complete.xlsx"
+# features = ["Death","PM10","O3","Temp"]
+# seq = 2
+# epoch = 8000
+# LimeDF = LimeLstm2(inputfilepath, features, seq, epoch)
+# LimeDF.to_csv("~/deeplearning/LSTM_Test/Canada/GVancouver_lime_epoch8000_seq9.csv",index = False)
+
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+Citylevel_limeDF2 <- function(csvfilepath){
+  
+  LimeDF <- read.csv(csvfilepath,row.names = NULL)
+  LimeDF$date <- as.character(LimeDF$date)
+  LimeDF$date <- as.Date(LimeDF$date,format="%Y-%m-%d")
+  DF <- pivot_longer(LimeDF,cols =1:(ncol(LimeDF)-1), names_to = "feature",values_to = "LIMEvalue" )
+  
+  # separate the feature name as predictor and lag
+  SepFeat<- function(string){regmatches(string, gregexpr("^[a-zA-Z0-9]+(?=Lag)|Lag\\d+$", string, perl = TRUE))[[1]]}
+  result <- lapply(DF$feature, SepFeat)
+  result <- do.call(rbind, result)  # Bind rows
+  result <- as.data.frame(result)        # Convert to data.frame
+  colnames(result) <- c("predictor", "Lag") # Optional: Name columns
+  DF <- cbind(DF,result)
+  
+  # add Warm or Cold label
+  WorC <- function(date){
+    if (as.numeric(format(date,"%m"))>3 & as.numeric(format(date,"%m")<10 )) {return("Warm")}
+    else {return("Cold")}
+  }
+  woc <- lapply(DF$date,WorC)
+  woc <- do.call(rbind,woc)
+  woc <- as.data.frame(woc)
+  names(woc) <- "WoC"
+  DF <- cbind(DF,woc)
+  
+  LimeDF <- DF
+  return(LimeDF)
+}
+```
+
+```{r}
+csvfilepath <- "~/deeplearning/LSTM_Test/Canada/GVancouver_lime_epoch8000_seq4.csv"
+LimeDF <- Citylevel_limeDF2(csvfilepath)
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(readxl)
+
+
+LimeCan <- function(filepath, CDnames, origfilepath){
+  
+  LimeDFCanCities <- data_frame(date = as.Date(0), feature = NA, LIMEvalue = NA, predictor = NA, Lag = NA, WoC = NA,city =   NA, Death = NA, Temp = NA, NO2=NA, O3=NA,Mort=NA,Morb=NA)
+  for (CDname in CDnames){
+    csvfilepath <-  paste0(filepath,"/",CDname,"_lime_epoch8000_seq9.csv")
+    LimeDF <- Citylevel_limeDF2(csvfilepath)
+    LimeDF$city <- rep(CDname,length(LimeDF$date))
+    
+    origDF <- read_xlsx(paste0(origfilepath,"/",CDname,"_consecutive.xlsx"))
+    origDF$date <- as.character(origDF$date)
+    origDF$date <- as.Date(origDF$date,format="%Y-%m-%d")
+    origDF$date <- as.character(origDF$date)
+    LimeDF$date <- as.character(LimeDF$date)
+    DF <- dplyr::left_join(LimeDF,origDF,by='date')
+    
+    LimeDFCanCities <- rbind(LimeDFCanCities,DF)
+  }
+  LimeDFCanCities <- LimeDFCanCities[-1,]
+  
+  LimeDFCanCities$date <- as.Date(LimeDFCanCities$date,format="%Y%m%d")
+  LimeDFCanCities$year <- format(LimeDFCanCities$date,"%Y")
+  LimeDFCanCities$month <- format(LimeDFCanCities$date,"%m")
+  return(LimeDFCanCities)
+}
+  
+# filepath <- "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive"
+# origfilepath <- "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive"
+# CDnames <- c("3520","3537","3539","4611","4806","4811","5915","5917")
+# Lime8CDseq9 <- LimeCan(filepath, CDnames, origfilepath)
+# write.csv(Lime8CDseq9,file = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq9.csv") 
+
+
+
+filepath <- "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3"
+origfilepath <- "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3"
+CDnames <- c("3506", "3520", "3524", "3525", "3543", "4806", "4811", "5915", "5917" )
+Lime9CDseq8 <- LimeCan(filepath, CDnames, origfilepath)
+write.csv(Lime9CDseq8,file = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq8.csv") 
+
+```
+```{r readinCanLimeData}
+
+
+CanDFseq2 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq2.csv")
+CanDFseq3 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq3.csv")
+CanDFseq4 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq4.csv")
+CanDFseq5 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq5.csv")
+CanDFseq6 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq6.csv")
+CanDFseq7 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq7.csv")
+CanDFseq8 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq8.csv")
+CanDFseq9 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq9.csv")
+CanDFseq2E5000 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch5000_seq2.csv")
+CanDFseq3C2 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq3_2.csv")
+CanDFseq4C2 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq4_2.csv")
+CanDFseq3PM10 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq3_pm10only.csv")
+
+
+
+
+```
+```{r}
+CanDF9CDseq2 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq2.csv")
+CanDF9CDseq3 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq3.csv")
+CanDF9CDseq4 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq4.csv")
+CanDF9CDseq5 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq5.csv")
+CanDF9CDseq8 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq8.csv")
+```
+
+
+
+```{r}
+# For city Toronto, PM10 Lime values decrease as temperature increase
+library(ggplot2)
+CanDF <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/Lime8CDs_epoch8000_seq4.csv")
+DF <- CanDF %>% filter(city=="3520")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=abs(LIMEvalue)))+
+  facet_grid(rows = vars(predictor),cols = vars(Lag))
+
+DF <- CanDF %>% filter(city=="3520") %>% filter(Lag=="Lag0") %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=WoC, group = interaction(WoC,year)))+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  ) 
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  ) 
+
+# For Greater Vancouver
+DF <- CanDF %>% filter(city=="5915")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=abs(LIMEvalue)))+
+  facet_grid(rows = vars(predictor),cols = vars(Lag))
+
+DF <- CanDF %>% filter(city=="5915") %>% filter(Lag=="Lag1") %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=WoC, group = interaction(WoC,year)))+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  ) 
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  )
+
+DF <- CanDF %>% filter(city=="5915") %>% filter(Lag=="Lag1") %>% filter(predictor=="Temp")
+DF %>% ggplot()+
+  geom_line(aes(x=date,y=LIMEvalue,color=WoC, group = interaction(WoC,year)))+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  ) 
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=abs(LIMEvalue),color=WoC))+
+  scale_color_manual(
+    values = c("Warm" = "red3", "Cold" = "deepskyblue3") 
+  )
+```
+
+
+
+
+
+
+
+
+```{r}
+# explore the Limevalue for PM10 and temperature
+DF <- CanDFseq4 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  facet_grid(rows = vars(Lag),cols = vars(city))
+# "Toronto","Essex","Middlesex","ManitobaNo.11","AlbertaNo.6","AlbertaNo.11","GreaterVancouver","Capital"
+
+```
+
+
+```{r}
+# explore the Limevalue for PM10 and temperature
+
+
+DF <- CanDFseq2 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Mort,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))
+
+DF <- CanDFseq3 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Mort,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.3,0.3)
+
+DF <- CanDFseq3C2 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Mort,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.3,0.3)
+
+DF <- CanDFseq4 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Mort,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2,0.3)
+
+DF <- CanDFseq5 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Mort,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2,0.3)
+
+```
+```{r}
+DF <- CanDFseq2 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq3 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq3C2 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq4 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq4C2 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))
+
+DF <- CanDFseq5 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq6 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq7 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq8 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+
+DF <- CanDFseq9 %>% filter(predictor=="PM10")
+DF %>% ggplot()+
+  geom_point(aes(x=Temp,y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+
+  facet_grid(rows = vars(Lag),cols = vars(city))+
+  ylim(-0.2, 0.4) 
+```
+
+```{r}
+# For one CD 
+library(lubridate)
+DF <- CanDFseq4C2  %>% filter(city=="3520") %>% filter(Lag=="Lag0") %>%  mutate(date=as.Date(date)) %>% mutate(YMonth = floor_date(date, "month"))
+monthly_avg <- DF %>%
+  group_by(YMonth,predictor) %>%
+  summarize(avg_LIMEvalue = mean(LIMEvalue, na.rm = TRUE))
+
+DF %>% ggplot() +
+  geom_boxplot(aes(x = as.factor(YMonth), y = LIMEvalue, color = WoC)) +
+  geom_line(data = monthly_avg, aes(x = as.factor(YMonth), y = avg_LIMEvalue, group = 1, color = "Average LIMEvalue"), size = 1.2) +
+  facet_wrap(~predictor)+
+  scale_x_discrete(labels = function(x) format(as.Date(x), "%Y-%m")) +
+  xlab("Year-Month") +
+  ylab("LIMEvalue") +
+  ggtitle("Monthly Boxplot of LIMEvalue (1996-2001) with Average Line") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.position = "bottom")
+
+DF %>% ggplot() +
+  geom_boxplot(aes(x = as.factor(YMonth), y = LIMEvalue, color = WoC)) +
+  geom_line(data = monthly_avg, aes(x = as.factor(YMonth), y = avg_LIMEvalue, group = 1), color = "pink", linewidth = 0.8) +
+  scale_x_discrete(labels = function(x) format(as.Date(x), "%Y-%m")) +
+  xlab("Year-Month") +
+  ylab("LIMEvalue") +
+  ggtitle("Monthly Boxplot of LIMEvalue (1996-2020) with Average Line") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+DF %>% ggplot()+
+  geom_boxplot(aes(x=as.factor(YMonth),y=LIMEvalue,color=WoC))+
+  geom_hline(yintercept = 0,color='black',linetype = "dashed",linewidth=0.3)+  xlab("Month") +
+  ylab("LIMEvalue") +
+  ggtitle("Monthly Boxplot of LIMEvalue (1996-2020)") +
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.5, hjust=1))
+
+```
+
+
+```{r}
+# explore the lag importance in LSTM models
+my_labeller <- as_labeller(c("3520"="Toronto","3537"="Essex","3539"="Middlesex","4611"="ManiNo.11","4806"="Calgary","4811"="AlbeNo.11","5915"="Vancouver","5917"="Capital"))
+my_labeller2 <- as_labeller(c("O3"="O3","PM10"="PM10","Temp"="Temperature"))
+
+CanDFseq2 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=2")))
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/LIMELagCanseq2.png",dpi = 500)
+
+CanDFseq3 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=3")))
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/LIMELagCanseq3.png",dpi = 500)
+
+CanDFseq4 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=4")))
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/LIMELagCanseq4.png",dpi = 500)
+
+CanDFseq5 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays/CanCDConsecutive/LIMELagCanseq5.png",dpi = 500)
+
+
+```
+
+```{r}
+
+# explore the lag importance in LSTM models for 9 CDs
+my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe","4806"="AlbeNo.6","4811"="AlbeNo.11","5915"="Vancouver","5917"="Capital")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq2 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=2")))
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCanseq2.png",height = 8,width = 7,dpi = 500)
+
+CanDF9CDseq3 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=3")))
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCanseq3.png",height = 8,width = 7,dpi = 500)
+
+CanDF9CDseq4 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=4")))
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCanseq4.png",height = 8,width = 7,dpi = 500)
+
+CanDF9CDseq5 %>% ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag))+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCanseq5.png",height = 8,width = 7, dpi = 500)
+
+
+
+```
+```{r}
+# explore the lag importance in LSTM models for 9 CDs
+my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq2 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520","3524","3525","3543") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=2")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq2.png",height = 5,width = 6, dpi = 500)
+
+
+
+my_labeller <- as_labeller(c("4806"="Calgary","4811"="Edmonton","5915"="Vancouver","5917"="Capital")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq2 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811","5915","5917") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=2")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq2.png",height = 5,width = 6, dpi = 500)
+
+
+
+my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq3 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520","3524","3525","3543") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=3")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq3.png",height = 5,width = 6, dpi = 500)
+
+
+
+my_labeller <- as_labeller(c("4806"="Calgary","4811"="Edmonton","5915"="Vancouver","5917"="Capital")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq3 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811","5915","5917") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=3")))+coord_flip()
+ ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq3.png",height = 5,width = 6, dpi = 500)
+
+
+my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq4 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520","3524","3525","3543") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=4")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq4.png",height = 5,width = 6, dpi = 500)
+
+
+
+my_labeller <- as_labeller(c("4806"="Calgary","4811"="Edmonton","5915"="Vancouver","5917"="Capital")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq4 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811","5915","5917") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=4")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq4.png",height = 5,width = 6, dpi = 500)
+
+
+my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520","3524","3525","3543") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq5.png",height = 5,width = 6, dpi = 500)
+
+
+
+my_labeller <- as_labeller(c("4806"="Calgary","4811"="Edmonton","5915"="Vancouver","5917"="Capital")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811","5915","5917") ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))+coord_flip()
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq5.png",height = 5,width = 6, dpi = 500)
+
+
+
+my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520","3524","3525","3543") ) %>%  ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))+coord_flip()
+  #scale_x_continuous(limits = c(0,0.3))
+
+
+
+my_labeller <- as_labeller(c("4806"="Calgary","4811"="Edmonton","5915"="Vancouver","5917"="Capital")
+)
+my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
+
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811","5915","5917") ) %>%  ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag,fill=Lag),alpha=0.5)+
+  facet_grid(predictor~city,labeller = labeller(city = my_labeller,predictor=my_labeller2))+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom")+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))+coord_flip()
+ # scale_x_continuous(limits = c(0,0.35))
+
+```
+```{r}
+#### Focus to Toronto
+
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>%  ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag,fill=Lag), alpha=0.5)+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") + 
+  facet_grid(city~predictor,labeller = labeller(city=c("3520"="Toronto"),predictor = c("Temp"="Temperature")))+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for Toronto LSTM model" )))+coord_flip()+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom"
+        )
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Torontoseq5.png",height = 4.5,width = 6,dpi = 500)
+ 
+
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag), alpha=0.5)+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") + 
+  facet_grid(city~predictor,labeller = labeller(city=c("3520"="Toronto"),predictor = c("Temp"="Temperature")))+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("Absolute LIME values for Toronto LSTM model" )))+coord_flip()+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom"
+        )
+
+ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Torontoseq5_abs.png",height = 4.5,width = 6,dpi = 500)
+ 
+# Calculate summary statistics
+summary_table <- CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>% group_by(predictor,Lag) %>%  summarise(
+    mean = mean(LIMEvalue),
+    median = median(LIMEvalue),
+    lower_95 = mean(LIMEvalue) - qt(0.975, df=n()-1) * sd(LIMEvalue) / sqrt(n()),
+    upper_95 = mean(LIMEvalue) + qt(0.975, df=n()-1) * sd(LIMEvalue) / sqrt(n())
+  )
+summary_table
+
+summary_table <- CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" )  %>% group_by(predictor,Lag) %>%  summarise(
+    mean = mean(abs(LIMEvalue)),
+    median = median(abs(LIMEvalue)),
+    lower_95 = mean(abs(LIMEvalue)) - qt(0.975, df=n()-1) * sd(abs(LIMEvalue)) / sqrt(n()),
+    upper_95 = mean(abs(LIMEvalue)) + qt(0.975, df=n()-1) * sd(abs(LIMEvalue)) / sqrt(n())
+  )
+summary_table
+```
+
+
+
+```{r}
+
+CanDFseq2 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))+
+  ylim(-0.4,0.4)
+
+CanDFseq2E5000 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))+
+  ylim(-0.4,0.4)
+
+CanDFseq3 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))
+
+CanDFseq3C2 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))
+
+CanDFseq4 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))
+
+CanDFseq4C2 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))
+
+CanDFseq3PM10 %>% ggplot()+
+  geom_boxplot(aes(x=Lag,y=LIMEvalue,color=Lag))+
+  facet_grid(rows = vars(predictor),cols=vars(city))
+```
+
+```{r}
+## ACS autocorrelation sequences
+## Spectrum 
+
+source("http://faculty.washington.edu/dbp/sauts/R-code/acvs.R")
+
+compute_Sj <- function(j,xs)
+{
+    N <- length(xs)
+    times <- 0:(N-1)
+    f_j <- j/N
+    temp <- (sum(xs*cos(2*pi*f_j*times)))^2
+    if(j == N/2) temp/N^2
+    else
+        2*(temp + (sum(xs*sin(2*pi*f_j*times)))^2)/N^2
+}
+espec <-function(x){ sapply(1:N,compute_Sj,x)}
+the_acs <-function(ts){ acvs(ts,acs=TRUE)$acvs[1:32]}
+
+Spec_Lime <- function(dat, city, Lag, predictor, AC_length=32,N=64)
+taus <- 0:31
+df <- CanDFseq4 %>% filter(city=="3537")%>% filter(Lag=="Lag0") %>% filter(predictor=="PM10") %>% select(LIMEvalue,Temp:Morb)
+df <- purrr::map(df,as.ts)
+
+
+Spec <- purrr::map(df,espec)
+ACS <- purrr::map(df, the_acs)
+
+
+freqs <- (1:N)/(2*N)
+plot(freqs,Spec$PM10 , col="purple",type="l")
+plot(freqs,Spec$Temp , col="red",type="l")
+plot(freqs,Spec$O3 , col="orange",type="l")
+plot(freqs,Spec$LIMEvalue,type="l",col="blue")
+plot(freqs,10^4*Spec$LIMEvalue,type="l",col="blue",ylim = c(0,max(Spec$Mort)))
+lines(freqs,Spec$Mort , col="darkgreen")
+# lines(freqs,Spec$Temp , col="red")
+# lines(freqs,Spec$PM10 , col="purple")
+# lines(freqs,Spec$O3 , col="orange")
+# lines(freqs,Spec$Morb , col="skyblue")
+
+T <- 0:31
+plot(T,ACS$PM10 , col="purple",type="p")
+plot(T,ACS$Temp , col="red",type="p")
+plot(T,ACS$O3 , col="orange",type="p")
+plot(T,ACS$LIMEvalue,type="p",col="blue")
+plot(T,ACS$LIMEvalue,type="p",col="blue",ylim=c(-0.1,1))
+lines(T,ACS$Mort , col="darkgreen",type="p")
+summary(as.data.frame(ACS))
+
+
+```
+```{r}
+# c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe","4806"="Alberta No. 6","4811"="Alberta No. 11","5915"="Vancouver","5917"="Capital")
+CDnames <- c("3506", "3520", "3524", "3525", "3543", "4806", "4811", "5915", "5917" )
+for (CD in CDnames){
+  cat("The CD code is : ",CD,"\n")
+  df <- CanDF9CDseq2 %>% filter(city==CD) %>% mutate(date=as.Date(date)) %>% select(date) %>%summary()
+  cat("The starting day is: ", df[1],"\n")
+  cat("The ending day is: ",df[6],"\n")
+  cat("The total entries number: ",CanDF9CDseq2 %>% filter(city==CD) %>% mutate(date=as.Date(date)) %>% nrow()/6,"Days. \n")
+  
+}
+```
+
+

@@ -1,0 +1,1043 @@
+```{python packages/libraries}
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.autograd import Variable
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import MinMaxScaler,StandardScaler
+from sklearn.metrics import mean_squared_error  # mse
+from sklearn.metrics import mean_absolute_error  # mae
+from sklearn.metrics import mean_absolute_percentage_error # mape
+from sklearn.metrics import r2_score  # R square
+import os, math
+import glob
+import re
+```
+
+```{python data_preprocess}
+def count_na_interpolate(df):
+    """
+    interpolation of dataset
+    :param df: dataframe of air pollutants
+    :return: dataset with interpolation
+    """
+    rows = df.index
+    cols = df.columns
+    r, c = len(list(rows)),len(list(cols))    # print(rows,cols,r,c)
+    for col in cols:
+        num_na = df[col].isna().sum()
+        
+        if num_na >0:
+            df[col] = df[col].interpolate(method='polynomial',order=2)
+    return df
+#################################################################################
+def data_scaler(df):
+    """
+    scale the dataset using standardization
+    :param df: df with interpolation
+    :return: dt_out: the whole dataset after standardization, scaler: all scalers used, for later inverse transform
+    """
+    dt = df.values
+    dt = dt.astype("float32")
+    r,c = dt.shape # row=5114
+    dt_scaler= dt[:,0].reshape((r,1)) 
+    scaler = []
+    dt_out = np.empty((r,0))
+    for i in np.arange(c-1):
+        dt_scaler =np.concatenate((dt_scaler,dt[:,i+1].reshape((r,1))),axis=1)  
+    ##################################### normalization
+    # for j in np.arange(c):
+    #     # scaler.append(MinMaxScaler())
+    #     scaler.append(StandardScaler())
+    #     tempt = scaler[j].fit_transform(dt_scaler[:, j].reshape((r, 1)))
+    #     dt_out = np.concatenate((dt_out,tempt),axis=1)
+    ##################################### standardization
+    for j in np.arange(c):
+        scaler.append(StandardScaler())
+        tempt = scaler[j].fit_transform(dt_scaler[:, j].reshape((r, 1)))
+        dt_out = np.concatenate((dt_out,tempt),axis=1)
+    
+    return dt_out,scaler
+
+def create_dataset(dt,seq):
+    """
+    reshape the dataset into (sequence,prediction) form, the first col dt[:,0] is the "health consequence", like mortality, cvd ...
+    :param dt: dataset after interpolation and rescaling
+    :param seq: sequence
+    :return: (sequenced data,prediction)
+    """
+    r,c = dt.shape 
+    dataX, dataY = [], [] # class list
+    ################### impact of the day when consequence occurs is included
+    for i in range(r - seq + 1):
+        x = dt[i:(i + seq), 1:c] # (seq,c-1)
+        y = dt[i + seq - 1,0] # (look_back,1)
+        dataX.append(x)
+        dataY.append([y])
+    ################### not included, only previous days' exposure are included
+    # for i in range(r - seq):
+    #     x = dt[i:(i + seq), 1:c]  # (seq,c-1)
+    #     y = dt[i + seq, 0]  # (look_back,1)
+    #     dataX.append(x)
+    #     dataY.append([y])
+    return np.array(dataX), np.array(dataY)
+
+def dataset_partition(dataX,dataY):
+    """
+    partition the dataset into training set and test set
+    :param dataX: input sequenced features-air pollutants sequence
+    :param dataY: mortality/morbidity
+    :return:
+    """
+    r,c = dataY.shape # r = 5114-seq+1
+    train_size = int(r * 0.7) # proportion for partition
+    test_size = r - train_size
+
+    torch_dataX= torch.from_numpy(dataX).type(torch.float32) # (r,seq,cols)
+    torch_dataY= torch.from_numpy(dataY).type(torch.float32) # (r,1)
+
+    train_x = torch_dataX[:train_size,:] #(train_size,seq,cols)
+    train_y = torch_dataY[:train_size]   #(test_size,1)
+    test_x = torch_dataX[train_size:,:]
+    test_y = torch_dataY[train_size:]
+    
+    ############################ run on GPU
+    device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+    )
+    torch_dataX = torch_dataX.to(device)
+    torch_dataY = torch_dataY.to(device)
+    train_x = train_x.to(device)
+    train_y = train_y.to(device)
+    test_x = test_x.to(device)
+    test_y = test_y.to(device)
+    
+    return torch_dataX,torch_dataY,train_x,train_y,train_size,test_x,test_y,test_size
+```
+
+```{python BuiltModel}
+class att(nn.Module):
+    def __init__(self,hidden):
+        super(att,self).__init__()
+        self.input = nn.Sequential(
+            
+            nn.Linear(hidden,1) # attention on all output of hidden layers
+            
+        )
+    def forward(self, x):
+        ############################# attention on the all output
+        w = self.input(x) # (batch_size, seq, hidden) >> (batch_size,seq,1)
+        
+        ws = F.softmax(w.squeeze(-1),dim=1) # torch.Size(batch_size,seq)
+        out_att0 = (x * ws.unsqueeze(-1)).sum(dim=1) #output: (batch_size,hidden)  (b,seq,hidden_size)*(b,seq,1)=(b,seq,hidden_size) after sum: (b,13)
+        # print("out_att:", out_att.shape)
+        ############################# attention on the last output x[:,-1,:] (batch_size,hidden_size)
+        # w = self.input(encoder) # (batch_size, hidden) >> (batch_size,hidden)
+        # ws = F.softmax(w,dim=1) # (batch_size,-1, hidden)
+        # out_att = encoder*ws #(batch_size,hidden) (b,13)*(b,13)=(b,13)
+        #############################
+        return out_att0
+
+############################################################ RNN class
+class LSTM_model(torch.nn.Module):
+    def __init__(self, input_size, hidden_size, out_size,num_layers) -> None:
+        super(LSTM_model, self).__init__()
+        self.rnn = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        # self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        # self.rnn = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.attention = att(hidden_size)
+        self.linear_out = nn.Sequential(
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(True),
+            nn.Linear(hidden_size, out_size)
+        )
+
+    def forward(self, x):
+        
+        x, _ = self.rnn(x) # (batch_size, seq, input_size)>>(batch_size, seq, hidden_size)
+        
+        out_att = self.attention(x) 
+        
+        out_in = self.linear_out(out_att) # 
+
+        return out_in
+#############################################################
+```
+
+```{python Read&SplitData}
+def read_data(features,filepath = './data_nmmaps/nmmaps_chic_1987_2000.xlsx',sheet_name=0):
+    
+    
+    df = pd.read_excel(filepath, engine='openpyxl',sheet_name=sheet_name)  
+   
+    df = df[features] 
+   
+    dt, scaler = data_scaler(df) 
+    return dt, scaler
+
+def split_dataset(dt,seq):
+    """
+    prepare the normalized data into training dataset and testing dataset with regard to the looking back steps/seq
+    """
+    dataX, dataY = create_dataset(dt, seq) 
+    torch_dataX,torch_dataY,train_x,train_y,train_size,test_x,test_y,test_size = dataset_partition(dataX,dataY)
+    batch_train, seq_train, feature_size = train_x.shape
+    
+    return dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size
+```
+
+
+```{python training}
+def train_model(feature_size, train_x, train_y, train_size, epochs_set):
+    h_size = 13
+    o_size = 1
+    n_layers = 5
+    l_rate = 5e-2 
+    epochs = epochs_set  
+    step = 100 
+    
+    # seed = 65
+    # torch.manual_seed(seed)# set random seed
+    ############################################################################
+    nn_net = LSTM_model(input_size = feature_size, hidden_size = h_size, out_size = o_size, num_layers = n_layers)
+    
+    ###### run the model on GPU################################################
+    device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+    )
+    nn_net = nn_net.to(device)
+    
+    loss_fun = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(nn_net.parameters(), lr=l_rate)
+    step_schedule = torch.optim.lr_scheduler.StepLR(step_size=step, gamma=0.95, optimizer=optimizer)
+
+    running_loss = 0.0
+   
+   
+    loss_show = []
+    for epoch in range(epochs):
+        var_x = train_x
+        var_y = train_y.reshape(train_size, -1)
+        out = nn_net(var_x)
+        loss = loss_fun(out, var_y)
+        loss_show.append(loss.item())
+        running_loss += loss.item()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        step_schedule.step()
+
+        
+    return nn_net, loss_show
+```
+
+```{python testing}
+def test_model(nn_net, dataY, torch_dataX, scaler):
+    test_net = nn_net.eval()  
+    train_predict = test_net(torch_dataX)
+    
+    if torch.cuda.is_available():
+      train_predict = train_predict.to('cpu') # if the model is running on GUP, move it to CPU
+    data_predict = train_predict.data.numpy()   # torch.Size([5110,1])
+    data_true = dataY                           # torch.Size([5110,1])
+    ####################################################### inversed scaling of mortality
+    data_predict = scaler[0].inverse_transform(data_predict)
+    data_true = scaler[0].inverse_transform(data_true)
+    
+    
+    
+    return data_predict, data_true
+
+```
+
+
+```{python metrics}
+def performance_metrics1(y_predict, y_true):
+    loss_error = y_predict - y_true
+    loss_mse = np.sum(loss_error**2)/len(loss_error)
+    loss_rmse = loss_mse**0.5
+    loss_mae = np.sum(np.absolute(loss_error)) / len(loss_error)
+    r_squared = 1-(np.sum((y_predict-y_true)**2)/np.var(y_true)/len(loss_error))
+    MAPE = np.sum(np.absolute(loss_error/y_true)) / len(loss_error)
+    return loss_error,loss_mse,loss_rmse,loss_mae,MAPE,r_squared
+def performance_metrics2(data_predict,data_true, train_size,mute = True):
+    error = data_predict-data_true
+    mse_train = mean_squared_error(data_true[0:train_size],data_predict[0:train_size])
+    rmse_train = mse_train**0.5
+    mae_train = mean_absolute_error(data_true[0:train_size],data_predict[0:train_size])
+    mape_train = mean_absolute_percentage_error(data_true[0:train_size],data_predict[0:train_size])
+    r2_train = r2_score(data_true[0:train_size],data_predict[0:train_size])
+
+    mse_test = mean_squared_error(data_true[train_size:],data_predict[train_size:])
+    rmse_test = mse_test**0.5
+    mae_test = mean_absolute_error(data_true[train_size:],data_predict[train_size:])
+    mape_test = mean_absolute_percentage_error(data_true[train_size:],data_predict[train_size:])
+    r2_test = r2_score(data_true[train_size:],data_predict[train_size:])
+    if not mute:
+      print("Train: using sklearn-metrics")
+      print("MSE:{:.4f},RMSE:{:.4f},MAE:{:.4f},MAPE:{:.4f},R2:{:.4f}".format(mse_train, rmse_train, mae_train, mape_train, r2_train))
+      print("Test: using sklearn-metrics")
+      print("MSE:{:.4f},RMSE:{:.4f},MAE:{:.4f},MAPE:{:.4f},R2:{:.4f}".format(mse_test, rmse_test, mae_test, mape_test, r2_test))
+      # print(np.around(mse_test,decimals=4),np.around(mae_test,decimals=4),np.around(mape_test,decimals=4),np.around(r2_test,decimals=4))  # 2.2719309220510002 1.182904648034428 -1.7949149334803214
+    return mse_train, rmse_train, mae_train, mape_train, r2_train, mse_test, rmse_test, mae_test, mape_test, r2_test
+```
+
+```{python Save Performance Metrics }
+#| echo = FALSE
+def Metrics(features,inputfilepath,outputfilepath,trial_num,seqs,epoch):
+  """
+  Training the LSTM model with data in the inputfilepath(xlsx file with a DataFrame structure) many times without set seed and save performance metrics to the outputfilepath
+  :param features: all the variables that are used for the input of the model, the first one is the response, others are the predictors
+  :param inputfilepath: input data file is a xlsx file
+  :param outputfilepath: output file store the performance metrics of LSTM models
+  :param trial_num: the times a LSTM model is trained without seting seed
+  :param seqs: the looking back steps in the LSTM models, has the form like [1,2,3,4]
+  :param epoch: epoch numbers in the LSTM model
+  """
+  
+  ##### cancel seed in train()######
+  dt,scaler = read_data(features,inputfilepath)
+  if os.path.isfile(outputfilepath):
+    os.remove(outputfilepath)
+  df1 = pd.DataFrame()
+  df1.to_excel(outputfilepath)
+  #df1.to_csv(outputfilepath)
+  DF = pd.DataFrame()
+  ##################
+  for seq in seqs:
+      mse, rmse, mae, mape, r2 = [], [], [], [], []
+      mseT, rmseT, maeT, mapeT, r2T = [], [], [], [], []
+      for trial in range(trial_num): 
+        print("##################### seq = {} trial = {} ############################".format(seq,trial+1))
+        dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size = split_dataset(dt, seq)
+        train_sizes.append(train_size)
+        nn_net, loss_show = train_model(feature_size, train_x, train_y, train_size, epoch)
+        data_predict, data_true = test_model(nn_net, dataY, torch_dataX,scaler)
+        mse_train, rmse_train, mae_train, mape_train, r2_train, mse_test, rmse_test, mae_test, mape_test, r2_test = performance_metrics2(data_predict, data_true, train_size)
+        mse.append(mse_train)
+        rmse.append(rmse_train)
+        mae.append(mae_train)
+        mape.append(mape_train)
+        r2.append(r2_train)
+        mseT.append(mse_test)
+        rmseT.append(rmse_test)
+        maeT.append(mae_test)
+        mapeT.append(mape_test)
+        r2T.append(r2_test ) 
+      train_sizes.append(train_size)  
+      df = pd.DataFrame({'MSE': mse, 'MSET':mseT, 'RMSE':rmse,'RMSET':rmseT,
+                         'MAE': mae, 'MAET':maeT,'MAPE':mape,'MAPET':mapeT,
+                         'R2':r2, 'R2T':r2T}, dtype='float32')
+      df["seq"] = seq
+      DF = pd.concat([DF, df], ignore_index=True)
+  with pd.ExcelWriter(outputfilepath,mode="a",engine='openpyxl', if_sheet_exists='replace') as writer:
+    DF.to_excel(writer, index=False)
+  # DF.to_csv(outputfilepath,index=False)      
+```
+
+```{python Save Predictive Data}
+#| echo = FALSE
+
+def LSTM_Predict(features,inputfilepath,outputfilepath,sheet_name,trial_num,seqs,epoch):
+  
+  """
+  Training the LSTM model with data in the inputfilepath(xlsx file with a DataFrame structure) many times without set seed and save the predictive values in the outputfilepath
+  :param features: all the variables that are used for the input of the model, the first one is the response, others are the predictors
+  :param inputfilepath: input data file is a xlsx file
+  :param outputfilepath: output file store the performance metrics of LSTM models
+  :param trial_num: the times a LSTM model is trained without seting seed
+  :param seqs: the looking back steps in the LSTM models, has the form like [1,2,3,4]
+  :param epoch: epoch numbers in the LSTM model
+  """
+  
+  ##### cancel seed in train()######
+  dt,scaler = read_data(features,inputfilepath,sheet_name=sheet_name)
+  if os.path.isfile(outputfilepath):
+      os.remove(outputfilepath)
+  df1 = pd.DataFrame()
+  df1.to_excel(outputfilepath)
+  for seq in seqs:
+      
+      
+      dataX, dataY, torch_dataX, torch_dataY, feature_size, train_x, train_y, train_size, test_x, test_y, test_size = split_dataset(dt, seq)
+      
+      df = pd.DataFrame()
+      for trial in range(trial_num): 
+        print("##################### seq = {} trial = {} ############################".format(seq,trial))
+        nn_net, loss_show = train_model(feature_size, train_x, train_y, train_size, epoch)
+        data_predict, data_true = test_model(nn_net, dataY, torch_dataX,scaler)
+        df['true{}'.format(trial+1)]= data_true.flatten()
+        df['predict{}'.format(trial+1)]= data_predict.flatten()
+      
+      with pd.ExcelWriter(outputfilepath,mode="a") as writer:
+        df.to_excel(writer, index=False, sheet_name="seq={}".format(seq))
+        
+
+```
+
+```{r setup}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(purrr)
+library("gam")  
+library("slp")
+library("MASS")
+library(mgcv)
+```
+
+
+```{r}
+#######################zero2tiny()function replace all the "0" in the "death" response of the city datasets with the tiny number "TinyN"
+
+zero2tiny <- function(citydf,response="death",TinyN=0.001){
+  citydf[[response]][citydf[[response]]==0] <- TinyN
+  citydf
+}
+
+########################################################################
+#For the 10 US cities, there is no "0" value in the "death" counts.
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/Citydata.RData"))
+
+
+#######################################################################
+zero2tiny_list <- function(Citydata,response="death",TinyN=0.01){
+  citynames <- names(Citydata)
+  Citydata_02t <- list() 
+  for (cityname in citynames){
+    df <- Citydata[[cityname]]
+    df <- zero2tiny(df,response = response,TinyN = TinyN)
+    assign(cityname,df)
+    Citydata_02t[[length(Citydata_02t)+1]] <- get(as.name(cityname))
+  }
+  names(Citydata_02t) <- citynames
+  Citydata_02t
+}
+################################################################################
+
+# Citydata <- zero2tiny_list(Citydata)
+# save(Citydata,file = paste0(filepath,"/Citydata_02t.RData"))
+################################################################################
+```
+
+```{r}
+## take logarithm for the response value of each city dataset.
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/Citydata_02t.RData"))
+
+LogRe <- function(citydf,response="death"){
+  citydf[[response]] <- log(citydf[[response]])
+  citydf
+}
+################################################################################
+# function to take the logarithm for the "death" column in each city's dataframe
+LogRe_list <- function(Citydata,response="death"){
+  
+  citynames <- names(Citydata)
+  Citydata_log <- list() 
+  for (cityname in citynames){
+    df <- Citydata[[cityname]]
+    df <- LogRe(df,response = response)
+    Citydata_log[[length(Citydata_log)+1]] <- df
+  }
+  names(Citydata_log) <- citynames
+  Citydata_log
+}
+
+################################################################################
+# Citydata <- LogRe_list(Citydata)
+# Citydata <- purrr::map(Citydata,LogRe)
+# save(Citydata,file = paste0(filepath,"/Citydata_log.RData"))
+```
+
+```{r DOWfilter}
+
+##########Day of Week filter: subtract the mean value for each day of the week
+########### firstly,apply the Day of Week filter to interpolated data for 10 big cities, then apply the High-Pass filter
+
+
+# List all .xlsx files in the directory
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/Citydata_log.RData"))
+
+
+DOW_filter <- function(df,features=c("death","tmpd","pm10orig","o3orig")){
+  for(feature in features){
+    avg <- paste0(gsub("orig","",feature),"_avg_dow")
+    dowf <- paste0(gsub("orig","",feature),"_dowf")
+    df <- df %>%
+      group_by(dow)%>%
+      mutate(!!avg := mean(get(feature))) %>%  
+      mutate(!!dowf:= get(feature) - get(avg))
+  }
+  df
+}
+
+# Citydata <- map(Citydata,DOW_filter)
+# save(Citydata,file = paste0(filepath,"/Citydata_DOWF.RData"))
+```
+
+
+```{r}
+################################################################################
+## High-Pass Filter S5
+library(readxl)
+library(writexl)
+library(dplyr)
+library(purrr)
+library("gam")  
+library("slp")
+library("MASS")
+
+HP_filter_base <- function(N_length, is.setseed=T){
+  tArr <- 1:N_length
+  dfGAM <- c(60, 120, 60, 120)
+  dfGAM <- as.integer(dfGAM*N_length/(3650/6))
+  if (is.setseed){set.seed(23)}
+  basis1 <- ns(x = tArr, df = dfGAM[1])
+  basis2 <- ns(x = tArr, df = dfGAM[2])
+  basis3 <- slp(x = tArr, K = dfGAM[3], naive = TRUE)
+  basis4 <- slp(x = tArr, K = dfGAM[4], naive = TRUE)
+  basis5 <- slp(x = tArr, K = dfGAM[3], intercept = TRUE)
+  basis6 <- slp(x = tArr, K = dfGAM[4], intercept = TRUE)
+  basis7 <- basis5[, -1] # equiv to running slp with intercept = FALSE
+  basis8 <- basis6[, -1]
+  baseMatrix <- vector("list", 8)
+  S1 <- basis1 %*% ginv(t(basis1) %*% basis1) %*% t(basis1)
+  S2 <- basis2 %*% ginv(t(basis2) %*% basis2) %*% t(basis2)
+  S3 <- basis3 %*% t(basis3)  # orthonormal, no inverse needed
+  S4 <- basis4 %*% t(basis4)
+  S5 <- basis5 %*% t(basis5)
+  S6 <- basis6 %*% t(basis6)
+  S7 <- basis7 %*% t(basis7)
+  S8 <- basis8 %*% t(basis8)
+  for(j in 1:8) {
+    baseMatrix[[j]] <- get(as.name(paste("S",j,sep="")))
+  }
+  names(baseMatrix) <- c("S1","S2","S3","S4","S5","S6","S7","S8")
+  baseMatrix
+}
+
+
+HighPass_filter <- function(df,features=c("death_dowf","tmpd_dowf","pm10_dowf","o3_dowf"),Base){
+  for(feature in features){
+    HPf <- paste0(gsub("dowf","",feature),"dow_HP")
+    X <- as.vector(df[[feature]])-Base%*%as.vector(df[[feature]])
+    df[,HPf] <- X
+  }
+  df
+}
+
+
+
+
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/Citydata_DOWF.RData"))
+# baseMatrix <- HP_filter_base(852)
+# Citydata <- map(Citydata,HighPass_filter,Base = baseMatrix$S5)
+# save(Citydata,file = paste0(filepath,"/Citydata_DOW_HPF.RData"))
+# write_xlsx(Citydata,path=paste0(filepath,"/Citydata_save1.xlsx"))
+```
+```{r}
+## take exponential for the response value of each city dataset.
+
+ExpRe <- function(citydf,response="death_dow_HP",newcl="death_filtered_exp"){
+  citydf[[newcl]] <- exp(citydf[[response]])
+  citydf
+}
+
+################################################################################
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/Citydata_DOW_HPF.RData"))
+
+# Citydata <- purrr::map(Citydata,ExpRe)
+# save(Citydata,file = paste0(filepath,"/Citydata_filtered_exp.RData"))
+```
+
+
+```{r}
+Citydata_precoss <- function(df,HP_filter=5){
+  base <- HP_filter_base(dim(df)[1])
+  Base <- base[[HP_filter]]
+  df <- df %>% zero2tiny() %>% LogRe() %>% DOW_filter() %>%
+    HighPass_filter(Base = Base) %>% ExpRe()
+  df
+}
+
+################################################################################
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/Citydata.RData"))
+# Citydata <- purrr::map(Citydata,Citydata_precoss)
+# save(Citydata,file = paste0(filepath,"/Citydata_filtered_exp.RData"))
+# write_xlsx(Citydata,path=paste0(filepath,"/Citydata_save2.xlsx"))
+```
+
+```{r}
+## Only calculate the GLM slopes on the training data set
+################################################################################
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+load(paste0(filepath,"/Citydata.RData"))
+Citydata_Training <- purrr::map(Citydata,head,-262)
+save(Citydata_Training,file = paste0(filepath,"/Citydata_Training.RData"))
+
+load(paste0(filepath,"/Citydata_Training.RData"))
+Citydata_T <- purrr::map(Citydata_Training,Citydata_precoss)
+save(Citydata_T,file = paste0(filepath,"/Citydata_filtered_exp_training.RData"))
+
+
+
+```
+
+```{r GLM}
+library(mgcv)  # version:1.9.1
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+load(paste0(filepath,"/Citydata_filtered_exp.RData"))
+City_GLM<- purrr::map(Citydata,glm,formula=death_filtered_exp~pm10_dow_HP+o3_dow_HP+tmpd_dow_HP,family=quasipoisson())
+
+
+################################################################################
+# Only on training data set
+load(paste0(filepath,"/Citydata_filtered_exp_training.RData"))
+City_GLM<- purrr::map(Citydata_T,glm,formula=death_filtered_exp~pm10_dow_HP+o3_dow_HP+tmpd_dow_HP,family=quasipoisson())
+save(City_GLM,file = paste0(filepath,"/City_GLM.RData"))
+
+```
+
+```{python LSTM_slope}
+filepath = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+inputfilepath = filepath+"/Citydata_save2.xlsx"
+trial_num = 30
+seqs = [1,2,3,4,5,6,7,8,9,10,11,12]
+epoch = 8000
+citynames = ["la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil"]
+
+for cityname in citynames:
+  features = ["death_filtered_exp","tmpd_dow_HP","o3_dow_HP"]
+  outputfilepath = filepath+"/LSTM_predictive/"+cityname+"_WithoutPM.xlsx"
+  LSTM_Predict(features,inputfilepath,outputfilepath,sheet_name=cityname,trial_num=trial_num,seqs=seqs, epoch=epoch)
+  
+  features = ["death_dow_HP","tmpd_dow_HP","pm10_dow_HP","o3_dow_HP"]
+  outputfilepath = filepath+"/LSTM_predictive/"+cityname+"_Full_save1.xlsx"
+  LSTM_Predict(features,inputfilepath,outputfilepath,sheet_name=cityname,trial_num=trial_num,seqs=seqs, epoch=epoch)
+  
+  features = ["death_dow_HP","tmpd_dow_HP","o3_dow_HP"]
+  outputfilepath = filepath+"/LSTM_predictive/"+cityname+"_WithoutPM_save1.xlsx"
+  LSTM_Predict(features,inputfilepath,outputfilepath,sheet_name=cityname,trial_num=trial_num,seqs=seqs, epoch=epoch)
+
+
+
+```
+
+```{r}
+#' transform the LSTM predictive values to residuals in a data.frame form(wide form).
+#'
+#' @param PreFile the file path of a predictive values from LSTM model (the return of function python/LSTM_Predict())
+#' @param CityFile the file path of a city-level date.frame that contain the 'date' conlumn for the time series of residuals. Like the file sanj.rda. It only provide the 'date' information for the function
+#' @param cityname the name of the city. It is not necessarily to be the same as the cityname of CityFile.
+#'
+#' @return a data.frame of residuals. Columes are the dates and the cityname and LookBackSteps. Observations are trials
+#' @export
+#'
+#' @examples
+#' PreFile <- "~/deeplearning/LSTM_Test/LSTM_Test/function_test/sanj_Full.xlsx"
+#' CityFile <- "~/deeplearning/LSTM_Test/LSTM_Test/function_test/sanj.rda"
+#' Resi <-  Resi_from_pred(PreFile,CityFile,"sanj") 
+
+
+Resi_from_pred <- function(PreFile,CityFile,cityname){
+  
+  
+  # determine the trial number
+  df <- readxl::read_xlsx(PreFile,sheet="seq=1")
+  trial <- as.integer(dim(df)[2]/2)
+  # determine the seqs
+  sheetname <- excel_sheets(PreFile)
+  seqs <- sum(grepl("seq=",sheetname))
+  # get the date variable for the data.frame
+  load(CityFile)
+  date <- as.Date(df$date)
+  # create the data.frame of residuals
+  TS_len <- length(date)
+  LSTM_residual <- data.frame(matrix(nrow = 1,ncol = TS_len))
+  LSTM_residual$city <- cityname  # which city the residuals are
+  LSTM_residual$LookBackStep <- NA #Look back steps for the LSTM model
+  for (i in seq(1,seqs)){
+    DF <- readxl::read_xlsx(PreFile,sheet = paste("seq=",i,sep = ""))
+    for (j in seq(1,trial)){
+      if (i==1){
+        TS_residual <- DF[[paste("predict",j,sep="")]]-DF[["true1"]]
+      } else{
+        TS_residual <- c(rep(NA,i-1),DF[[paste("predict",j,sep="")]]-DF[["true1"]])
+      }
+      TS_residual <- data.frame(t(TS_residual))
+      TS_residual$city <- cityname
+      TS_residual$LookBackStep <- i
+      LSTM_residual <- rbind(LSTM_residual,TS_residual)
+    }
+  }
+  names(LSTM_residual)[1:TS_len] <- date
+  LSTM_residual[-1,]
+}
+
+```
+
+```{r}
+# transform the Predictive values (results of function LSTM_Predict()) into data.frame for 10 cities
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+CityFile <- "~/deeplearning/LSTM_Test/LSTM_Test/function_test/sanj.rda"
+City_Full_residual <- data.frame()
+City_Without_residual <- data.frame()
+
+for (cityname in citynames){
+  df <- Resi_from_pred(PreFile = paste0(filepath,"/",cityname,"_Full.xlsx"),CityFile = CityFile,cityname = cityname )
+  City_Full_residual <- dplyr::bind_rows(City_Full_residual,df)
+  df <- Resi_from_pred(PreFile = paste0(filepath,"/",cityname,"_WithoutPM.xlsx"),CityFile = CityFile,cityname = cityname )
+  City_Without_residual <- dplyr::bind_rows(City_Without_residual,df)
+}
+
+
+```
+
+```{r}
+#' Title Use predictive vaules to calculate LSTM-based association coefficients(slopes)
+#' The function takes the full model's predictive values from PredicFull, and takes the predictive values of model without the PM10 by PredictWithout. Both the PredictFull and PredictWithout files have the format saved by the function LSTM_Predict(). 
+#' predictor should have the "pm10orig" variable to fit the final linear regression.
+# return Slope as a vector with length 8. Each value is a slope for the model with one looking back step
+
+#'
+#' @param df_Full  A data.frame of the full model's predictive values. The form of this data.frame
+#' is sheet that saved by function LSTM_Predict(). 
+
+#' @param df_Off  A data.frame of the predictive values from the model without predictor. The form of this data.frame is sheet that saved by function LSTM_Predict().
+#' @param predictor_df predictor_df is the data.frame that has the predictor values that will fit the final linear regression. In our case, it is the time series of PM10 with the column name 'origpm10'.
+#' @param predictor the column name of predictors in the predictor_df for the final linear regression
+#' @param trials number of trials of LSMT
+#' @param seq lookback steps. Default is 1
+#' @param cityname the cityname 
+#' @param intercept Whether the final linear regression will have the intercept. Default is FALSE
+#' @param TrainingOnly Logic value representing wether only use training data. The number of cutting off the rest data is `cutoff`
+#' @param cutoff The number for cutting off the data/time series for Training-only data. This number will be used when 'TrainingOnly = TRUE'. The default number is 262
+#'
+#' @return data frame with 3 columns: "slopes" of each trial, "seq", and "cityname"=NA
+#' @export
+#'
+#' @examples
+
+LSTM_association <- function(df_Full,df_Off,predictor_df,predictor="pm10orig",trials=30,seq,cityname=NA,intercept=FALSE,TrainingOnly=TRUE,cutoff=262,...){
+  
+  if (TrainingOnly) {
+    df_Full <- head(df_Full,-cutoff)
+    df_Off <- head(df_Off,-cutoff)
+    predictor_df <- head(predictor_df,-cutoff)
+  }
+  
+  slopes <- NULL
+  if (seq>1) {predictor_df <- predictor_df[-seq(1,seq-1),]}
+  for (j in 1:trials){
+    Diff <- df_Full[[paste0("predict",j)]]- df_Off[[paste0("predict",j)]]
+    dat <- data.frame(Diff=Diff,PM10=predictor_df[[predictor]])
+    if (intercept){
+      mod <- lm(Diff~PM10,data=dat)
+      slopes <- c(slopes,mod$coefficients[2])
+      }
+    else {
+      mod <- lm(Diff~PM10-1,data=dat)
+      slopes <- c(slopes,mod$coefficients)
+      }
+  }
+  names(slopes) <- NULL
+  Slopes <- data.frame(slope=slopes,seq=rep(seq,trials),cityname=as.character(rep(cityname,trials)))
+  Slopes$seq <- as.factor(Slopes$seq)
+  Slopes$cityname <- as.factor(Slopes$cityname)
+  return(Slopes)
+}
+
+
+# example
+# filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+# cityname <- "la"
+# file_full <- paste0(filepath,"/",cityname,"_Full.xlsx")
+# file_without <- paste0(filepath,"/",cityname,"_WithoutPM.xlsx")
+# df_Full <- read_xlsx(file_full,sheet = paste0('seq=',2))
+# df_Off <- read_xlsx(file_without,sheet = paste0('seq=',2))
+# filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# load(paste0(filepath,"/",cityname,".rda"))# the name of the data.frame is df
+# predictor_df <- df
+# seq <- 2
+# Lstm_slope <- LSTM_association(df_Full,df_Off,predictor_df,predictor="pm10orig",trials=30,seq=seq,cityname=cityname,intercept=FALSE)
+# summary(Lstm_slope)
+# plot(Lstm_slope$slope)
+# # With intercept in the linear regression
+# Lstm_slope <- LSTM_association(df_Full,df_Off,predictor_df,predictor="pm10orig",trials=30,seq=seq,cityname=cityname,TrainingOnly = T,cutoff = 262 )
+# summary(Lstm_slope)
+# plot(Lstm_slope$slope)
+```
+
+
+```{r}
+#' Title Calculate the LSTM-based association coefficient for each city
+#'
+#' @param cityname 
+#' @param filepath the folder that has all the 'Full' and 'Without' .xlsx files 
+#' @param predictor_path the folder that has city data
+#' @param seq_range range of the look back , 1:8 by default
+#' @param save1 logical value, whether use the save1 type data
+#' @param intercept whether there is intercept in the final linear regression
+#'
+#' @return return a data.frame 'Slopes' in a long form. variables are "slope", "seq", "cityname"
+
+#' @export
+#'
+#' @examples filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+#' predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+#' cityname <- "la"
+#' Slopes <- LSTM_assoc_citylevel(cityname, filepath,predictor_path, seq_range=seq(1:8),save1=FALSE,intercept=FALSE)
+
+LSTM_assoc_citylevel <- function(cityname, filepath,predictor_path,seq_range=seq(1:8),save1=FALSE,...)
+{
+  # return a data.frame Slopes in a long form. variables are "slope", "seq", "cityname"
+  
+  Slopes <- data.frame(slope=NA,seq=NA,cityname=NA)
+  
+  if (save1){
+    file_full <- paste0(filepath,"/",cityname,"_Full_save1.xlsx")
+    file_without <- paste0(filepath,"/",cityname,"_WithoutPM_save1.xlsx")
+  }else {
+    file_full <- paste0(filepath,"/",cityname,"_Full.xlsx")
+    file_without <- paste0(filepath,"/",cityname,"_WithoutPM.xlsx")
+  }
+  
+  for (seq in seq_range){
+    
+    df_Full <- read_xlsx(file_full,sheet = paste0('seq=',seq))
+    df_Off <- read_xlsx(file_without,sheet = paste0('seq=',seq))
+    load(paste0(predictor_path,"/",cityname,".rda"))# the name of the data.frame is df
+    predictor_df <- df
+    Lstm_slope <- LSTM_association(df_Full,df_Off,predictor_df,predictor="pm10orig",seq=seq,cityname=cityname,...)
+    
+    Slopes <- rbind(Slopes,Lstm_slope)  
+  }
+  Slopes <- Slopes[-1,]
+ 
+}
+
+# Example 1 
+
+# Slopes <- LSTM_assoc_citylevel(cityname, filepath,predictor_path, seq_range=seq(1:8),save1=FALSE,intercept=FALSE)
+# 
+# library(ggplot2)
+# ggplot(data = Slopes, mapping =  aes(x = seq, y = slope))+
+#   geom_boxplot()+
+#   labs(title = "LSTM based Slopes for LA", x = "looking back steps", y = "LSTM based Slopes")
+```
+
+```{r}
+ ## Give multiple cities' LSTM slopes box-plots
+LSTM_ASS_MulCityPlot <- function(citynames,AddAverage=F,...){
+  
+  args <- list(...)
+  
+  Slopes_MulC <- data.frame(slope=NA,seq=NA,cityname=NA)
+  for (cityname in citynames){
+    Slopes_MulC<- rbind(Slopes_MulC,LSTM_assoc_citylevel(cityname=cityname,...))
+    
+  }
+  Slopes_MulC <- Slopes_MulC[-1,]
+  
+  library(ggplot2)
+  ggplot(data = Slopes_MulC, mapping =  aes(x = seq, y = slope))+
+    geom_boxplot()+
+    labs( title = args$PlotTitle,x = "looking back steps", y = "LSTM based Slopes")+
+    facet_wrap(~ cityname)
+  if (AddAverage){
+    
+    ggplot(data = Slopes_MulC, mapping =  aes(x = seq, y = slope))+
+      geom_boxplot() +
+      stat_summary(
+        fun = mean,
+        geom = "line",
+        aes(group = 1, color = "Average"),
+        size = 0.5
+      ) +
+      labs(
+        title = args$PlotTitle,
+        x = "Looking Back Steps",
+        y = "LSTM Based Slopes",
+        color = "Average Slope"
+      ) +
+      facet_wrap(~ cityname)
+  }
+  
+  
+
+  
+}
+
+
+# filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+# predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,TrainingOnly = F,PlotTitle = "LSTM based Slopes on Training and Testing Data Set (exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save2.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,save1 = T,TrainingOnly = F,PlotTitle = "LSTM based Slopes on Training and Testing Data Set (non-exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save1.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save2_training.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,filepath=filepath,predictor_path=predictor_path,save1 = T,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (non-exponentialed response)")
+# # ggsave(filename =paste0(filepath,"/LSTM_save1_training.png"),dpi = 500)
+# LSTM_ASS_MulCityPlot(citynames=citynames,AddAverage=T,filepath=filepath,predictor_path=predictor_path,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (exponentialed response)")
+# LSTM_ASS_MulCityPlot(citynames=citynames,AddAverage=T,filepath=filepath,predictor_path=predictor_path,save1 = T,TrainingOnly=T,cutoff=262,PlotTitle = "LSTM based Slopes on Training Data Set (non-exponentialed response)")
+```
+
+```{r}
+# returen Multiple Cities' LSTM slopes data.frame
+LSTM_ASS_MulCityDF <- function(citynames,...){
+  
+  Slopes_MulC <- data.frame(slope=NA,seq=NA,cityname=NA)
+  for (cityname in citynames){
+    Slopes_MulC<- rbind(Slopes_MulC,LSTM_assoc_citylevel(cityname=cityname,...))
+    
+  }
+  Slopes_MulC <- Slopes_MulC[-1,]
+  return(Slopes_MulC)
+}
+
+# Example
+################################################################################
+# filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_predictive"
+# predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+# citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+# 
+# LSTM_10cities_save1 <- LSTM_ASS_MulCityDF(citynames=citynames,filepath=filepath,predictor_path=predictor_path,save1 = T)
+# LSTM_10cities_save2 <- LSTM_ASS_MulCityDF(citynames=citynames,filepath=filepath,predictor_path=predictor_path)
+# 
+# save(LSTM_10cities_save1,file = paste0(predictor_path,"/LSTM_10cities_save1.RData"))
+# save(LSTM_10cities_save2,file = paste0(predictor_path,"/LSTM_10cities_save2.RData"))
+
+```
+
+
+
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_10cities_save1.RData")
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/LSTM_10cities_save2.RData")
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda/City_GLM.RData")
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+GLM_slope <- data.frame(slope=NA,lower_b=NA,upper_b=NA,cityname=NA)
+for (cityname in citynames){
+  q <- qt(p = 0.975, df = 586)
+  coefs1 <- summary(City_GLM[[cityname]])$coefficients["pm10_dow_HP", 1:2]
+  CI <- coefs1[1] + c(-1, 1) * q * coefs1[2]
+  
+  glm_slope <- data.frame(slope = City_GLM[[cityname]]$coefficients[2],lower_b=CI[1],upper_b=CI[2],cityname=cityname)
+  GLM_slope <- rbind(GLM_slope,glm_slope)
+}
+GLM_slope <- GLM_slope[-1,]
+row.names(GLM_slope) <- NULL
+names(GLM_slope) <- c("GLM_slope","GLM_lowerB","GLM_upperB","cityname")
+names(LSTM_10cities_save1) <- c("LSTM_slope","seq","cityname")
+names(LSTM_10cities_save2) <- c("LSTM_slope","seq","cityname")
+
+###################################################################
+##   GLM vs. LSTM(save1 & save2)
+GLM_slope$GLM_slope_exp <- exp(GLM_slope$GLM_slope)
+GLM_slope$GLM_upperB_exp <- exp(GLM_slope$GLM_upperB)
+GLM_slope$GLM_lowerB_exp <- exp(GLM_slope$GLM_lowerB)
+
+Com1 <- dplyr::left_join(LSTM_10cities_save1,GLM_slope,by='cityname')
+Com2 <- dplyr::left_join(LSTM_10cities_save2,GLM_slope,by='cityname')
+
+summary(Com1)
+
+Com1_sorted <- Com1 %>%
+  filter(seq == 5 ) %>%
+  group_by(cityname) %>%
+  summarize(mean_GLM_slope = mean(GLM_slope, na.rm = TRUE)) %>%
+  arrange(mean_GLM_slope)
+
+Com1$cityname <- factor(Com1$cityname, levels = Com1_sorted$cityname)
+
+ggplot(data = Com1[Com1$seq>1 & Com1$seq<9,])+
+  geom_boxplot(aes(x=cityname,y=LSTM_slope),color='chartreuse')+
+  geom_point(aes(x=cityname, y=GLM_upperB/700),shape=25, color='brown3',alpha=0.2)+
+  geom_point(aes(x=cityname, y=GLM_lowerB/700),shape=24,color='darkred',alpha=0.2)+
+  facet_wrap(~ seq)+
+  scale_y_continuous(limits = c(-0.000005,0.000005),sec.axis = sec_axis(~ . * 700, name = "GLM Slope"))
+
+
+summary(Com2)
+
+Com2_sorted <- Com2 %>%
+  filter(seq == 5 ) %>%
+  group_by(cityname) %>%
+  summarize(mean_GLM_slope = mean(GLM_slope, na.rm = TRUE)) %>%
+  arrange(mean_GLM_slope)
+
+Com2$cityname <- factor(Com2$cityname, levels = Com2_sorted$cityname)
+
+ggplot(data = Com2[Com2$seq>1 & Com2$seq<9,])+
+  geom_boxplot(aes(x=cityname,y=LSTM_slope),color='chartreuse')+
+  # geom_point(aes(x=cityname, y=GLM_upperB_exp/70000),shape=25, color='brown3',alpha=0.2)+
+  # geom_point(aes(x=cityname, y=GLM_lowerB_exp/70000),shape=24,color='darkred',alpha=0.2)+
+  geom_point(aes(x=cityname, y=GLM_slope),shape=21,color='darkorange',alpha=0.2)+
+  facet_wrap(~ seq)+
+  scale_y_continuous(sec.axis = sec_axis(~ . * 700, name = "GLM Slope"))
+
+
+
+ggplot(data = Com2,mapping = aes(x=cityname, y = GLM_upperB_exp))+
+  geom_point()
+
+
+```
+```{r} 
+##################
+###calculate LSTM slopes for unfiltered input models
+################################################################################
+filepath <-"~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_unfiltered"
+predictor_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_unfiltered"
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+LSTM_10cities <- LSTM_ASS_MulCityDF(citynames=citynames,filepath=filepath,predictor_path=predictor_path,trials =1)
+
+###Visualization
+################################################################################
+names(LSTM_10cities) <- c("LSTM_slope","seq","cityname")
+Com <- dplyr::left_join(LSTM_10cities,GLM_slope,by='cityname')
+Com_sorted <- Com %>%
+  filter(seq == 5 ) %>%
+  group_by(cityname) %>%
+  summarize(mean_GLM_slope = mean(GLM_slope, na.rm = TRUE)) %>%
+  arrange(mean_GLM_slope)
+
+Com$cityname <- factor(Com$cityname, levels = Com_sorted$cityname)
+library(ggplot2)
+ggplot(data = Com)+
+  geom_point(mapping = aes(x=cityname, y = GLM_slope/LSTM_slope),color="red")+
+  facet_wrap(~ seq)+
+  scale_y_continuous(limits = c(-50,50),sec.axis = sec_axis(~ . * 1, name = "GLM Slope"))
+
+ggplot(data = Com)+
+  geom_point(mapping = aes(x=cityname, y = GLM_slope),color="red")+
+  geom_boxplot(mapping = aes(x=cityname, y = LSTM_slope),color="chartreuse")
+
+```
+

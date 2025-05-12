@@ -1,0 +1,199 @@
+```{r US_data_process}
+#| echo = FALSE
+#########create excel files for each city's data, aggregate numbers for death and disease in age categories
+citydata <- function(dat, features=NULL){
+  # dat <- chic
+  # features <- c("tmean","pm10mean","date","o3mean")
+  TMort <- aggregate(x=dat[c("death","copd","accident","cvd","inf","pneinf","pneu","resp")],by=dat["date"],FUN=sum)
+  rown <- nrow(dat)/3
+  if (!is.null(features)){
+    dat <- dat[features]}
+  dat <- dat[1:rown,]
+  dat$death <- TMort$death
+  dat$copd <- TMort$copd
+  dat$accident <- TMort$accident
+  dat$cvd <- TMort$cvd
+  dat$inf <- TMort$inf
+  dat$pneinf <- TMort$pneinf
+  dat$pneu <- TMort$pneu
+  dat$resp <- TMort$resp
+  return(dat)
+}
+
+library(writexl)
+# Set the directory containing the .rda files
+directory <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_Cities_rda"
+# List all .rda files in the directory
+rda_files <- list.files(path = directory, pattern = "\\.rda$", full.names = F)
+for (filepath in rda_files) {
+  full_path <- paste(directory,"/",filepath,sep = '')
+  load(file = full_path)
+  #features <- c("tmean","pm10mean","date","o3mean") ## without 'death' 'copd' 'accident' 'cvd'
+  x <- as.name(unlist(strsplit(filepath, split='.', fixed=TRUE))[1])
+  dat <- citydata(get(x))
+  newdir <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_Cities_xlsx"
+  filename <- paste(newdir,"/",x,".xlsx",sep = '')
+  if (file.exists(filename)){
+    unlink(filename)
+  }
+  write_xlsx(dat,filename)
+}
+
+############find the 20 cities with the biggest populations in the NMMAPS data
+load("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/cities.rda")
+Cites <- cities[order(-cities$pop),]
+SortedCites <- Cites[1:20,"city"]
+SortedCitesName <- Cites[1:20,"cityname"]
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_Cities_xlsx"
+newfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities"
+features <- c("death","tmpd","tmax","tmin","tmean","dptp","rhum" , "mxrh", "mnrh" ,"pm10mean", "pm10median",  "pm10meanmax","pm10tmean","pm10mtrend", "o3mean" ,     "o3median","o3meanmax","o3tmean","o3mtrend", "so2mean" ,"so2median",  "so2meanmax" ,"so2tmean","so2mtrend", "no2mean"    , "no2median",   "no2meanmax","no2tmean","no2mtrend",  "comean","comedian" ,   "comeanmax" ,"cotmean","comtrend",  "date", "dow")
+MissingNum <- list() ## the number of missing values for pollutants of each city
+for (filename in SortedCites){
+  full_path <- paste(filepath,"/",filename,".xlsx",sep = '')
+  DFcity <- read_excel(full_path,.name_repair = "unique_quiet")
+  DFcity <- DFcity[features]
+  DFcity$pm10orig <- DFcity$pm10tmean+DFcity$pm10mtrend
+  DFcity$o3orig <- DFcity$o3tmean+DFcity$o3mtrend
+  DFcity$so2orig <- DFcity$so2tmean+DFcity$so2mtrend
+  DFcity$no2orig <- DFcity$no2tmean+DFcity$no2mtrend
+  DFcity$coorig <- DFcity$cotmean+DFcity$comtrend
+  MissingNum[[filename]] <- c(sum(is.na(DFcity$pm10orig)),sum(is.na(DFcity$o3orig)),sum(is.na(DFcity$so2orig)),sum(is.na(DFcity$no2orig)),sum(is.na(DFcity$coorig)))
+  write_xlsx(DFcity,path=paste(newfilepath,"/",filename,".xlsx",sep = '') )
+}
+
+#############################
+SortedCites[! SortedCites %in% c("clev","atla","minn","seat","det")]# delete the cities with too much missing values for O3
+
+
+ReCities <- SortedCites[! SortedCites %in% c("clev","atla","minn","seat","det","chic","denv")]#ReCities are cities that have pm10 records once every 6 days
+
+#create time series data once in 6 days from daily data
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities/"
+newfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days/"
+for (filename in ReCities){
+  dat <- read_excel(path= paste(filepath,filename,".xlsx",sep=""),.name_repair = "unique_quiet") 
+  View(dat)
+  startday <- readline(prompt = "Enter the starting day for record: ")
+  dat <- dat[seq(as.numeric(startday),5114,by=6),]
+  write_xlsx(dat,path=paste(newfilepath,filename,".xlsx",sep = ''))
+  print(cat("the number of missing values is",sum(is.na(dat$pm10orig))))
+}
+## All the cities start to record pm10 from the 3rd day (19870103)
+# Visualize missing data
+# install.packages("naniar")
+library(naniar)
+miss_var_summary(dat)
+```
+```{python US_data_process2}
+#| echo=FALSE
+############################# interpolate missing data for Big Cities #######################
+
+# # Define the folder path (replace with your directory path)
+folder_path = './data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days'
+files = os.listdir(folder_path)
+# Use glob to find all .xlsx files in the folder
+excel_files = glob.glob(os.path.join(folder_path, '*.xlsx'))
+new_path = '~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_interpolated'
+for file in excel_files:
+    df = pd.read_excel(file,engine='openpyxl')
+    df = count_na_interpolate(df)
+    filename = os.path.split(file)[1]
+    
+    with pd.ExcelWriter(os.path.join(new_path,filename)) as writer:
+      df.to_excel(writer, index=False)
+
+```
+
+```{r US_data_process3}
+#| echo=FALSE
+
+library(naniar)
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_interpolated/"
+MissingSummary <- list()
+for (filename in ReCities){
+  dat <- read_excel(path= paste(filepath,filename,".xlsx",sep=""),.name_repair = "unique_quiet") 
+  print(cat("data set for the city of",filename))
+  MissingSummary[[filename]] <- miss_var_summary(dat)
+  View(miss_var_summary(dat))
+}
+## all most all cities lack data for "tmean" after interpolating. But "tmpd"(temperature mean of max and min) don't lack data.
+## pm10orig still has missing vaules for cities "phoe", "staa", "oakl". So these three cities are removed.
+ReCities <- ReCities[! ReCities %in% c("phoe", "staa", "oakl")]
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_interpolated/"
+newfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final/"
+for (filename in ReCities){
+  dat <- read_excel(path= paste(filepath,filename,".xlsx",sep=""),.name_repair = "unique_quiet") 
+  dat <- dat[c("death","tmpd","pm10orig","o3orig", "date", "dow")]
+  write_xlsx(dat,path=paste(newfilepath,filename,".xlsx",sep = ''))
+  print(sum(is.na(dat)))
+}
+## All the dataset for the last 10 cities have no missing values.
+```
+
+```{r DOWfilter}
+library(readxl)
+library(writexl)
+library(dplyr)
+##########Day of Week filter: subtract the mean value for each day of the week
+########### firstly,apply the Day of Week filter to interpolated data for 10 big cities, then apply the High-Pass filter
+
+# List all .xlsx files in the directory
+citynames <- c("dlft","hous",  "miam","ny","phil","rive","sand", "sanb", "sanj", "la" )
+directory <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final"
+for (filepath in citynames) {
+  full_path <- paste(directory,"/",filepath,".xlsx",sep = '')
+  # Calculate the average of value_col, grouped by group_col
+  df <- read_excel(path = full_path,.name_repair = "unique_quiet")
+  df <- df %>%
+    group_by(dow) %>%
+    mutate(death_avg_dow = mean(death)) %>%  
+    mutate(death_dowf = death - death_avg_dow)
+  df <- df %>%
+    group_by(dow) %>%
+    mutate(tmpd_avg_dow = mean(tmpd)) %>%
+    mutate(tmpd_dowf = tmpd - tmpd_avg_dow)
+  df <- df %>%
+    group_by(dow) %>%
+    mutate(pm10_avg_dow = mean(pm10orig)) %>%
+    mutate(pm10_dowf = pm10orig - pm10_avg_dow)
+  df <- df %>%
+    group_by(dow) %>%
+    mutate(o3_avg_dow = mean(o3orig)) %>%
+    mutate(o3_dowf = o3orig - o3_avg_dow)
+  
+  df <- df[c("death_dowf","tmpd_dowf","pm10_dowf","o3_dowf","date","dow")]
+  
+  new_full_path <- paste(directory,"/",filepath,"_dow.xlsx",sep='')
+  write_xlsx(df, new_full_path)
+}
+
+```
+```{r}
+## After undetrending, selecting every 6 days, interpolating the missing ones from the US 10-city dataset, convert the .xlsx files of city data in the folder "NMMAPS_BigCities_6days_final" into .rda files and place them in the folder "NMMAPS_BigCities_6days_final_rda"
+library(readxl)
+library(writexl)
+library(dplyr)
+
+# create the new folder
+mainDir <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities"
+subDir <- "NMMAPS_BigCities_6days_final_rda"
+if (!file.exists(subDir)){
+  dir.create(file.path(mainDir, subDir))
+  } 
+
+citynames <- c("dlft","hous",  "miam","ny","phil","rive","sand", "sanb", "sanj", "la" )
+filepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final"
+newfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_final_rda"
+Citydata <- list()
+for (cityname in citynames) {
+  full_path <- paste(filepath,"/",cityname,".xlsx",sep = '')
+  df <- read_excel(path = full_path,.name_repair = "unique_quiet")
+  save(df,file = paste0(newfilepath,"/",cityname,".rda"))
+  assign(cityname,df)
+  Citydata[[length(Citydata)+1]] <- get(as.name(cityname))
+}
+names(Citydata) <- citynames
+save(Citydata,file = paste0(newfilepath,"/Citydata.RData"))
+# load(paste0(newfilepath,"/Citydata.RData"))
+```
+
