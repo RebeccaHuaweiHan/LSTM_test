@@ -1850,3 +1850,51 @@ plt.plot(range(10),range(10))
 plt.show()
 ```
 
+
+```{r}
+# Specify the folder path
+folder_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_unfiltered"
+
+# Get a list of files in the folder containing "Predict" in their names
+files <- list.files(folder_path, pattern = "WithoutPM10", full.names = TRUE)
+
+# Specify the text to replace "Predict" with
+replacement_text <- "WithoutPM"
+
+# Loop through each file and rename it
+for (file in files) {
+  # Extract the file name
+  file_name <- basename(file)
+  
+  # Generate the new file name
+  new_name <- gsub("WithoutPM10", replacement_text, file_name)
+  
+  # Construct full path for the new file name
+  new_file <- file.path(folder_path, new_name)
+  
+  # Rename the file
+  file.rename(file, new_file)
+  cat("Renamed:", file_name, "->", new_name, "\n")
+}
+
+```
+
+```{r}
+#### add the number '1' to the column's names of predictive value files
+folder_path <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/NMMAPS_Cities/NMMAPS_BigCities_6days_unfiltered"
+citynames <- c("la","ny","dlft","hous","sand","miam", "sanb", "sanj", "rive", "phil")
+for (cityname in citynames){
+  filename <- paste0(folder_path,"/",cityname,"_WithoutPM.xlsx")
+  DF <- list()
+  for (seq in seq(1,8)){
+    df <- read_xlsx(filename,sheet = paste0('seq=',seq))
+    names(df) <- c("true1","predict1")
+    DF[[paste0("seq=",seq)]] <-df 
+    
+  }
+  write_xlsx(DF,path = filename)
+  
+  
+}
+```
+
