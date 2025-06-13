@@ -596,6 +596,35 @@ DF %>% ggplot() +
   guides(color = guide_legend(ncol = 3))
   
 # ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_O3.png",height=6,width=7,dpi = 500) 
+#################################################################################
+
+DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month"),Year_floor = floor_date(date, "year")) %>% filter(predictor!= "tmpd") %>%  mutate(year=as.numeric(format(date,"%Y")))%>% mutate(month=factor(format(date,"%m"))) 
+yearly_avg <- DF %>%
+  group_by(year,predictor,Lag) %>%
+  summarize(Year_avg_LIMEvalue = mean(LIMEvalue,na.rm = TRUE))
+DF <- DF %>%
+  left_join(yearly_avg, by = c("year", "predictor","Lag"))
+# Define color-blind friendly palette (Okabe-Ito)
+okabe_ito_palette <- c("comean" = "#E69F00", "o3mean" = "#56B4E9", "no2mean" = "#009E73", "pm10mean" = "#F0E442") 
+
+DF %>% ggplot() +
+  geom_line(aes(x = Year_floor, y = Year_avg_LIMEvalue, color = predictor, linetype = Lag)) +
+  geom_point(aes(x = Year_floor, y = Year_avg_LIMEvalue, color = predictor, shape = predictor), size = 2) +
+  scale_color_manual(values = okabe_ito_palette) +  # Color-blind friendly
+  scale_shape_manual(values = c(16, 17, 18, 15)) +  # Different node types (shapes)
+  scale_linetype_manual(values = c("solid", "dashed", "dotted", "dotdash", "longdash")) + # Unique line types
+  xlab("Time") +
+  ylab("Yearly Average LIME Value for Air Pollutants") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom", # Set legend position
+    legend.direction = "horizontal", # Arrange legend items horizontally
+    legend.title = element_blank(), # Remove legend title
+    axis.text.y = element_text(angle = 45, hjust = 1)
+  ) +
+  guides(color = guide_legend(ncol = 3), shape = guide_legend(ncol = 3), linetype = guide_legend(ncol = 3)) 
+
+# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_O3_color.png",height = 6, width = 7, dpi = 500)
 
 
 
@@ -630,7 +659,7 @@ TableLIME %>% kableExtra::kable()
 # Figure 4.10 The Yearly Absolute Average LIME values Across Lag 0 and Lag 3
 ##############################################################################
 
-
+okabe_ito_palette <- c("comean" = "#E69F00", "o3mean" = "#56B4E9", "no2mean" = "#009E73", "pm10mean" = "#F0E442") 
 # Chicago model with only Lag0 and Lag3: yearly average LIME values 
 DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month"),Year_floor = floor_date(date, "year")) %>% filter(predictor!= "tmpd") %>%  mutate(year=as.numeric(format(date,"%Y")))%>% mutate(month=factor(format(date,"%m"))) 
 yearly_avg <- DF %>%
@@ -639,31 +668,29 @@ yearly_avg <- DF %>%
 DF <- DF %>%
   left_join(yearly_avg, by = c("year", "predictor","Lag"))
 
+shape_mapping <- c("comean" = 16, "o3mean" = 17, "no2mean" = 18, "pm10mean" = 15)
 DF %>% ggplot() +
-  geom_line(aes(x=Year_floor, y=Year_avg_LIMEvalue,color=predictor,linetype=Lag))+
-  geom_point(aes(x=Year_floor, y=Year_avg_LIMEvalue,color=predictor))+
-  scale_color_brewer(palette="Set2")+
-  xlab("Time")+
-  ylab("Yearly Anverage LIME Value for Air Pollutants")+
-  theme_minimal()+
+  geom_line(aes(x = Year_floor, y = Year_avg_LIMEvalue, color = predictor, linetype = Lag)) +
+  geom_point(aes(x = Year_floor, y = Year_avg_LIMEvalue, color = predictor, shape = predictor), size = 2) +
+  scale_color_manual(values = okabe_ito_palette, labels = c("CO", "O3", "NO2", "PM10")) +  # Color-blind friendly colors
+  scale_shape_manual(values = shape_mapping,labels = c("CO", "O3", "NO2", "PM10")) +  # Unique shapes for predictors
+  scale_linetype_manual(values = c("solid", "dashed", "dotted", "dotdash", "longdash")) + # Unique line types
+  xlab("Time") +
+  ylab("Yearly Average LIME Value for Air Pollutants") +
+  theme_minimal() +
   theme(
-    legend.position = c(0.8,0.9), # Set legend position to bottom
-    legend.direction = "vertical", # Arrange legend items horizontally
+    legend.position = "bottom", # Set legend position to the bottom
+    legend.direction = "horizontal", # Arrange legend items horizontally
     legend.title = element_blank(), # Remove legend title
     axis.text.y = element_text(angle = 45, hjust = 1)
   ) +
-  scale_color_manual(
-    values = c("comean" = "#007BFF", "o3mean" = "#FFC107", "no2mean" = "#FF5722","pm10mean"="#4CAF50"),
-    labels = c("comean" = "CO", "o3mean" = "O3", "no2mean" = "NO2","pm10mean"="PM10")
-  ) +
-  theme(
-  legend.position = "bottom", # Set legend position to the bottom
-  legend.direction = "horizontal", # Arrange legend items horizontally
-  legend.title = element_blank(), # Remove legend title
-  axis.text.y = element_text(angle = 45, hjust = 1)
-)
+  guides(color = guide_legend(title = "Air Pollutant"), 
+         shape = guide_legend(title = "Air Pollutant"), 
+         linetype = guide_legend(title = "Air Pollutant")) 
   
-# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_Lag03.png",height=6,width=7,dpi = 500) 
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_Lag03_color.png",height=6,width=7,dpi = 500) 
+##################################################################################
+
 
 yearly_lag_avg <- DF %>%
   group_by(year,predictor) %>%
@@ -672,7 +699,7 @@ DF <- DF %>%
   left_join(yearly_lag_avg, by = c("year", "predictor"))
 DF %>% ggplot() +
   geom_line(aes(x=Year_floor, y=Year_Lag_avg_LIMEvalue,color=predictor))+
-  geom_point(aes(x=Year_floor, y=Year_Lag_avg_LIMEvalue,color=predictor))+
+  geom_point(aes(x=Year_floor, y=Year_Lag_avg_LIMEvalue,color=predictor,shape=predictor))+
   scale_color_brewer(palette="Set2")+
   xlab("Time")+
   ylab("Yearly Absolute LIME Value Across Lag for Air Pollutants")+
@@ -684,17 +711,26 @@ DF %>% ggplot() +
     axis.text.y = element_text(angle = 45, hjust = 1)
   ) +
   scale_color_manual(
-    values = c("comean" = "#007BFF", "o3mean" = "#FFC107", "no2mean" = "#FF5722","pm10mean"="#4CAF50"),
+    # values = c("comean" = "#007BFF", "o3mean" = "#FFC107", "no2mean" = "#FF5722","pm10mean"="#4CAF50"),
+    values = okabe_ito_palette,
     labels = c("comean" = "CO", "o3mean" = "O3", "no2mean" = "NO2","pm10mean"="PM10")
   ) +
+  scale_shape_manual(values = shape_mapping,labels = c("CO", "O3", "NO2", "PM10")) +
   theme(
   legend.position = "bottom", # Set legend position to the bottom
   legend.direction = "horizontal", # Arrange legend items horizontally
   legend.title = element_blank(), # Remove legend title
-  axis.text.y = element_text(angle = 45, hjust = 1)
+  axis.text.y = element_text(angle = 45, hjust = 1)+
+  guides(color = guide_legend(title = "Air Pollutant"), 
+         shape = guide_legend(title = "Air Pollutant")) 
 )
   
-# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_acrossLag03.png",height=6,width=7,dpi = 500) 
+ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_acrossLag03.png",height=6,width=7,dpi = 500) 
+######################################################################################
+
+
+
+
 
 ```
 
