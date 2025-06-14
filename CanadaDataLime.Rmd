@@ -327,6 +327,11 @@ CanDF9CDseq3 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDa
 CanDF9CDseq4 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq4.csv")
 CanDF9CDseq5 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq5.csv")
 CanDF9CDseq8 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq8.csv")
+library(tidyverse)
+library(stringr)
+library(writexl)
+library(readxl)
+library(lubridate)
 ```
 
 
@@ -550,6 +555,8 @@ DF %>% ggplot()+
 
 
 ```{r}
+
+
 # explore the lag importance in LSTM models
 my_labeller <- as_labeller(c("3520"="Toronto","3537"="Essex","3539"="Middlesex","4611"="ManiNo.11","4806"="Calgary","4811"="AlbeNo.11","5915"="Vancouver","5917"="Capital"))
 my_labeller2 <- as_labeller(c("O3"="O3","PM10"="PM10","Temp"="Temperature"))
@@ -662,7 +669,59 @@ ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O
 
 ```
 ```{r}
+################################################################################
+# Figure 4.16-4.21 The absolute LIME values in LSTM model for the Canadian 9 CDs datasets
+################################################################################
+
 # explore the lag importance in LSTM models for 9 CDs
+CanDF9CDseq2 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq2.csv")
+CanDF9CDseq3 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq3.csv")
+CanDF9CDseq4 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq4.csv")
+CanDF9CDseq5 <- read.csv("~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Lime9CDs_epoch8000_seq5.csv")
+library(tidyverse)
+library(stringr)
+library(writexl)
+library(readxl)
+library(lubridate)
+
+#### Focus to Toronto
+################################################################################
+# Figure 4.16 The LIME values in LSTM model with m=5 for the Toronto datasets
+################################################################################
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>%  ggplot()+
+  geom_boxplot(aes(x=LIMEvalue,color=Lag,fill=Lag), alpha=0.5)+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") + 
+  facet_grid(city~predictor,labeller = labeller(city=c("3520"="Toronto"),predictor = c("Temp"="Temperature")))+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("LIME values for Toronto LSTM model" )))+coord_flip()+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom"
+        )
+
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Torontoseq5.png",height = 4.5,width = 6,dpi = 500)
+ 
+################################################################################
+# Figure 4.17 The absolute LIME values in LSTM model with m=5 for the Toronto datasets
+################################################################################
+CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>%  ggplot()+
+  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag), alpha=0.5)+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") + 
+  facet_grid(city~predictor,labeller = labeller(city=c("3520"="Toronto"),predictor = c("Temp"="Temperature")))+
+  scale_color_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x=expression(paste("Absolute LIME values for Toronto LSTM model" )))+coord_flip()+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom"
+        )
+
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Torontoseq5_abs.png",height = 4.5,width = 6,dpi = 500)
+
+################################################################################
+# Figure 4.18 The absolute LIME values in LSTM model with m=2 for the Canadian CD datasets
+################################################################################
 my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
 )
 my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
@@ -677,9 +736,7 @@ CanDF9CDseq2 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=2")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq2.png",height = 5,width = 6, dpi = 500)
-
-
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq2.png",height = 5,width = 6, dpi = 500)
 
 my_labeller <- as_labeller(c("4806"="Calgary","4811"="Edmonton","5915"="Vancouver","5917"="Capital")
 )
@@ -695,10 +752,12 @@ CanDF9CDseq2 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=2")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq2.png",height = 5,width = 6, dpi = 500)
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq2.png",height = 5,width = 6, dpi = 500)
 
 
-
+################################################################################
+# Figure 4.19 The absolute LIME values in LSTM model with m=3 for the Canadian CD datasets
+################################################################################
 my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
 )
 my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
@@ -713,7 +772,7 @@ CanDF9CDseq3 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=3")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq3.png",height = 5,width = 6, dpi = 500)
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq3.png",height = 5,width = 6, dpi = 500)
 
 
 
@@ -731,9 +790,11 @@ CanDF9CDseq3 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=3")))+coord_flip()
- ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq3.png",height = 5,width = 6, dpi = 500)
+ # ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq3.png",height = 5,width = 6, dpi = 500)
 
-
+################################################################################
+# Figure 4.20 The absolute LIME values in LSTM model with m=4 for the Canadian CD datasets
+################################################################################
 my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
 )
 my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
@@ -748,7 +809,7 @@ CanDF9CDseq4 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=4")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq4.png",height = 5,width = 6, dpi = 500)
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq4.png",height = 5,width = 6, dpi = 500)
 
 
 
@@ -766,9 +827,11 @@ CanDF9CDseq4 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=4")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq4.png",height = 5,width = 6, dpi = 500)
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq4.png",height = 5,width = 6, dpi = 500)
 
-
+################################################################################
+# Figure 4.21 The absolute LIME values in LSTM model with m=5 for the Canadian CD datasets
+################################################################################
 my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
 )
 my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
@@ -783,7 +846,7 @@ CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("3506","3520"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq5.png",height = 5,width = 6, dpi = 500)
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan1seq5.png",height = 5,width = 6, dpi = 500)
 
 
 
@@ -801,10 +864,11 @@ CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811"
   scale_color_brewer(palette = "Dark2")+
   scale_fill_brewer(palette = "Dark2")+
   labs(x=expression(paste("LIME values for LSTM model with " , m,"=5")))+coord_flip()
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq5.png",height = 5,width = 6, dpi = 500)
+# ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/LIMELagCan2seq5.png",height = 5,width = 6, dpi = 500)
 
-
-
+################################################################################
+```
+```{r}
 my_labeller <- as_labeller(c("3506"="Ottawa","3520"="Toronto","3524"="Halton","3525"="Hamilton","3543"="Simcoe")
 )
 my_labeller2 <- as_labeller(c("O3"="O3","NO2"="NO2","Temp"="Temperature"))
@@ -840,38 +904,11 @@ CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city %in% c("4806","4811"
  # scale_x_continuous(limits = c(0,0.35))
 
 ```
+
 ```{r}
-#### Focus to Toronto
 
-CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>%  ggplot()+
-  geom_boxplot(aes(x=LIMEvalue,color=Lag,fill=Lag), alpha=0.5)+
-  geom_vline(xintercept = 0, linetype = "dashed", color = "black") + 
-  facet_grid(city~predictor,labeller = labeller(city=c("3520"="Toronto"),predictor = c("Temp"="Temperature")))+
-  scale_color_brewer(palette = "Dark2")+
-  scale_fill_brewer(palette = "Dark2")+
-  labs(x=expression(paste("LIME values for Toronto LSTM model" )))+coord_flip()+
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        legend.position = "bottom"
-        )
-
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Torontoseq5.png",height = 4.5,width = 6,dpi = 500)
- 
-
-CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>%  ggplot()+
-  geom_boxplot(aes(x=abs(LIMEvalue),color=Lag,fill=Lag), alpha=0.5)+
-  geom_vline(xintercept = 0, linetype = "dashed", color = "black") + 
-  facet_grid(city~predictor,labeller = labeller(city=c("3520"="Toronto"),predictor = c("Temp"="Temperature")))+
-  scale_color_brewer(palette = "Dark2")+
-  scale_fill_brewer(palette = "Dark2")+
-  labs(x=expression(paste("Absolute LIME values for Toronto LSTM model" )))+coord_flip()+
-  theme(axis.ticks.x = element_blank(),
-        axis.text.x = element_blank(),
-        legend.position = "bottom"
-        )
-
-ggsave(filename = "~/deeplearning/LSTM_Test/Canada/CDLargestConsecutiveDays_NO2O3/CanCDConsecutive_NO2O3/Torontoseq5_abs.png",height = 4.5,width = 6,dpi = 500)
- 
+```
+```{r}
 # Calculate summary statistics
 summary_table <- CanDF9CDseq5 %>% mutate(city=factor(city)) %>%  filter(city =="3520" ) %>% group_by(predictor,Lag) %>%  summarise(
     mean = mean(LIMEvalue),

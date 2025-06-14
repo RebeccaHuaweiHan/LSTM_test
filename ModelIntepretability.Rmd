@@ -891,10 +891,12 @@ LimeDF.to_csv("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/chic_lime_epo
 ```
 
 ```{r}
+################################################################################
+# Figure 4.22 The LIME values for PM10 with Lags from 0 to 4 in a LSTM model with the Chicago dataset
+################################################################################
+
 # Chic model with temperature and PM10
 csvfilepath <- "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/chic_lime_epoch5000_seq4_pm10Only.csv"
-
-
 LimeDF <- read.csv(csvfilepath,row.names = NULL)
 LimeDF$date <- as.character(LimeDF$date)
 LimeDF$date <- as.Date(LimeDF$date,format="%Y-%m-%d")
@@ -925,6 +927,17 @@ DF$year <- format(DF$date,"%Y")
 DF$month <- format(DF$date,"%m")
 
 ggplot(DF)+
+  geom_boxplot(aes(x=Lag,y=LIMEvalueAB),color='navyblue')+
+  labs(y="LIME values for PM10")
+  # theme_minimal() 
+  # scale_y_continuous(limits = c(-0.1,0.3))
+# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMELag.png",height = 4,width = 6,dpi = 500)
+###################################################################################
+
+
+
+
+ggplot(DF)+
   geom_line(aes(x=date,y=LIMEvalueAB,color=WoC,group=interaction(year,WoC)))+
   facet_wrap(~Lag,nrow = 4)+
   scale_color_manual(
@@ -933,19 +946,7 @@ ggplot(DF)+
   theme_minimal() +
   # theme(legend.position = "none") +
   labs(y="LIME values for PM10")
-ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMELag~date.png",dpi = 500)  
-
-ggplot(DF)+
-  geom_boxplot(aes(x=Lag,y=LIMEvalueAB),color='navyblue')+
-  labs(y="LIME values for PM10")
-  # theme_minimal() 
-  # scale_y_continuous(limits = c(-0.1,0.3))
-ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMELag.png",height = 4,width = 6,dpi = 500)
-
-
-
-
-
+# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIMELag~date.png",dpi = 500)  
 ```
 
 ```{r}
@@ -976,7 +977,7 @@ write.csv(chicLimeDF,file = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME
 
 ```{r}
 ################################################################################
-# Figure 4.2 to 4.6 The LIME values for 4 air pollutions in the LSTM model with the Chicago dataset.
+# Figure 4.1 to 4.8 The LIME values for 4 air pollutions in the LSTM model with the Chicago dataset.
 ################################################################################
 
 # Chicago model with 4 APs for LIME
@@ -984,6 +985,38 @@ library(lubridate)
 library(gridExtra) 
 chicLimeDF <- read.csv("~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/CHICLime_epoch8000_seq5_4ap.csv")
 chicLimeDF$date <- as.Date(chicLimeDF$date,format="%Y-%m-%d")
+
+#################################################################################
+# Figure 4.1 The LIME explanation at two local instances in the LSTM model with the Chicago dataset.
+#################################################################################
+
+DF <- chicLimeDF %>% filter(date==as.Date("1987-01-05")) %>% filter(predictor!="Temperature")
+plot1 <- ggplot(DF, aes(x = Lag, y = LIMEvalue,color=predictor,fill=predictor)) +
+  geom_bar(stat = "identity",position = "dodge",color="lightgrey") +
+  scale_fill_viridis_d(name = "air pollutants") +  # Applying a color-blind friendly palette
+  scale_color_viridis_d() +
+  coord_flip() +
+  labs( y = "LIME Value for Instance A") +
+  ylim(-0.10,0.06)+
+  #scale_fill_discrete(name="air pollutants")+
+  theme_minimal()+
+  theme(legend.position = c(0.2, 0.85),  
+        legend.key = element_blank())
+DF <- chicLimeDF %>% filter(date==as.Date("1996-12-01")) %>% filter(predictor!="Temperature")
+plot2 <- ggplot(DF, aes(x = Lag, y = LIMEvalue,color=predictor,fill=predictor)) +
+  geom_bar(stat = "identity",position = "dodge",color="lightgrey") +
+  scale_fill_viridis_d() +  # Applying a color-blind friendly palette
+  scale_color_viridis_d() +
+  coord_flip() +
+  labs(y = "LIME Value for Instance B") +
+  ylim(-0.10,0.06)+
+  theme_minimal()+
+  theme(legend.position="none",axis.title.y = element_blank())
+combplot <- arrangeGrob(plot1, plot2, ncol = 2)
+combplot
+# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_instance_colorfriendly.png",plot=combplot,dpi = 500)
+
+
 
 ################################################################################
 # Figure 4.2 The LIME values for 4 air pollutions with Lag 0 in the LSTM model with the Chicago dataset.
@@ -1044,33 +1077,10 @@ DF %>% ggplot()+
 
 
 
-DF <- chicLimeDF %>% filter(date==as.Date("1987-01-05")) %>% filter(predictor!="Temperature")
-plot1 <- ggplot(DF, aes(x = Lag, y = LIMEvalue,color=predictor,fill=predictor)) +
-  geom_bar(stat = "identity",position = "dodge",color="lightgrey") +
-  scale_fill_viridis_d(name = "air pollutants") +  # Applying a color-blind friendly palette
-  scale_color_viridis_d() +
-  coord_flip() +
-  labs( y = "LIME Value for Instance A") +
-  ylim(-0.10,0.06)+
-  #scale_fill_discrete(name="air pollutants")+
-  theme_minimal()+
-  theme(legend.position = c(0.2, 0.85),  
-        legend.key = element_blank())
-DF <- chicLimeDF %>% filter(date==as.Date("1996-12-01")) %>% filter(predictor!="Temperature")
-plot2 <- ggplot(DF, aes(x = Lag, y = LIMEvalue,color=predictor,fill=predictor)) +
-  geom_bar(stat = "identity",position = "dodge",color="lightgrey") +
-  scale_fill_viridis_d() +  # Applying a color-blind friendly palette
-  scale_color_viridis_d() +
-  coord_flip() +
-  labs(y = "LIME Value for Instance B") +
-  ylim(-0.10,0.06)+
-  theme_minimal()+
-  theme(legend.position="none",axis.title.y = element_blank())
-combplot <- arrangeGrob(plot1, plot2, ncol = 2)
-combplot
-ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_instance_colorfriendly.png",plot=combplot,dpi = 500)
 
-
+#################################################################################
+# Figure 4.7 The monthly LIME values for 4 air pollutions with Lag 0 in the LSTM model with the Chicago dataset.
+#################################################################################
 
 DF <- chicLimeDF  %>% mutate(YMonth = floor_date(date, "month")) %>% filter(Lag=="Lag0") %>% filter(predictor!="Temperature") %>% mutate(year=factor(format(date,"%Y")))%>% mutate(month=factor(format(date,"%m")))
 
@@ -1095,12 +1105,13 @@ DF %>% ggplot() +
         axis.text.y = element_text( angle = 45, hjust = 1),
         legend.position = "bottom")
 
-ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_monthly.png",dpi = 500) 
+# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_monthly.png",dpi = 500) 
   
 
 
 ########################################################################################
-
+# Figure 4.8 The Yearly Average LIME values for O3 in the LSTM model with the Chicago dataset.
+########################################################################################
 
 # Define a color-blind friendly palette (Okabe-Ito)
 okabe_ito_palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2")
@@ -1124,18 +1135,11 @@ DF %>% ggplot() +
   ) +
   guides(color = guide_legend(ncol = 3), linetype = guide_legend(ncol = 3), shape = guide_legend(ncol = 3)) 
 
-ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_O3_color.png",
-       height = 6, width = 7, dpi = 500)
-
-
-
-
-
-
-
-
+# ggsave(filename = "~/deeplearning/LSTM_Test/LSTM_Test/data_nmmaps/LIME/LIME_yearly_O3_color.png",height = 6, width = 7, dpi = 500)
 
 ```
+
+
 ```{r}
 # Chicago 4AP model yearly LIME
 
